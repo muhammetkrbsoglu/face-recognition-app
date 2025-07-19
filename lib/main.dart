@@ -189,6 +189,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   CameraController? _cameraController;
+  CameraDescription? _cameraDescription; // Kameranın tanımını saklamak için
   bool _cameraInitialized = false;
   bool _processing = false;
   String? _resultMessage;
@@ -212,6 +213,9 @@ class _HomePageState extends State<HomePage> {
     try {
       final cameras = await availableCameras();
       final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
+      
+      _cameraDescription = frontCamera; // Kamera tanımını sakla
+      
       _cameraController = CameraController(
         frontCamera, 
         ResolutionPreset.medium,
@@ -401,12 +405,14 @@ class _HomePageState extends State<HomePage> {
         else
           const Center(child: CircularProgressIndicator()),
         
-        if (_cameraInitialized && _cameraController != null)
+        if (_cameraInitialized && _cameraController != null && _cameraDescription != null)
           RealTimeQualityOverlay(
             cameraController: _cameraController!,
+            // DÜZELTME: Gerekli olan cameraDescription parametresi eklendi.
+            cameraDescription: _cameraDescription!,
             isCapturing: _processing,
             onQualityChanged: (canCapture) {
-              if (mounted) {
+              if (mounted && _canCapture != canCapture) {
                 setState(() {
                   _canCapture = canCapture;
                 });
@@ -599,8 +605,6 @@ class _AdminPageState extends State<AdminPage> {
     );
   }
 
-  // DÜZELTME: AdminPage'in kamerasını yönetme mantığı kaldırıldı,
-  // çünkü AdminPage'in kendisi bir kamera kullanmıyor.
   Future<void> _showAddFaceDialog() async {
     await showDialog(
       context: context,
@@ -634,6 +638,7 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
   String _selectedGender = 'male';
   bool _isSaving = false;
   CameraController? _cameraController;
+  CameraDescription? _cameraDescription; // Kameranın tanımını saklamak için
   bool _cameraInitialized = false;
   bool _cameraError = false;
   
@@ -650,6 +655,9 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
     try {
       final cameras = await availableCameras();
       final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
+      
+      _cameraDescription = frontCamera; // Kamera tanımını sakla
+
       _cameraController = CameraController(
         frontCamera, 
         ResolutionPreset.medium,
@@ -671,6 +679,7 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
 
   @override
   void dispose() {
+    _cameraController?.stopImageStream();
     _cameraController?.dispose();
     _nameController.dispose();
     super.dispose();
@@ -796,17 +805,20 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
                           fit: StackFit.expand,
                           children: [
                             CameraPreview(_cameraController!),
-                            RealTimeQualityOverlay(
-                              cameraController: _cameraController!,
-                              isCapturing: _isCapturing,
-                              onQualityChanged: (canCapture) {
-                                if (mounted) {
-                                  setState(() {
-                                    _canCapture = canCapture;
-                                  });
-                                }
-                              },
-                            ),
+                            if (_cameraDescription != null)
+                              RealTimeQualityOverlay(
+                                cameraController: _cameraController!,
+                                // DÜZELTME: Gerekli olan cameraDescription parametresi eklendi.
+                                cameraDescription: _cameraDescription!,
+                                isCapturing: _isCapturing,
+                                onQualityChanged: (canCapture) {
+                                  if (mounted && _canCapture != canCapture) {
+                                    setState(() {
+                                      _canCapture = canCapture;
+                                    });
+                                  }
+                                },
+                              ),
                           ],
                         ),
                       ),

@@ -54,21 +54,24 @@ class RealTimeFaceDetectionService {
     _faceDetector = FaceDetector(options: options);
   }
 
-  Future<FaceDetectionResult?> detectFaces(CameraImage cameraImage, CameraController cameraController) async {
+  Future<FaceDetectionResult?> detectFaces(CameraImage cameraImage, CameraDescription cameraDescription) async {
     if (_isProcessing || _faceDetector == null) {
       return null;
     }
 
     _isProcessing = true;
     try {
-      final inputImage = _inputImageFromCameraImage(cameraImage, cameraController);
+      final inputImage = _inputImageFromCameraImage(cameraImage, cameraDescription);
       if (inputImage == null) {
         return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Kamera görüntüsü işlenemedi', confidence: 0.0, imageSize: Size.zero);
       }
 
       final faces = await _faceDetector!.processImage(inputImage);
+      
+      final imageSize = Size(cameraImage.width.toDouble(), cameraImage.height.toDouble());
+
       if (faces.isEmpty) {
-        return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0, imageSize: inputImage.metadata!.size);
+        return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0, imageSize: imageSize);
       }
 
       Face? primaryFace = faces.reduce((a, b) => a.boundingBox.width * a.boundingBox.height > b.boundingBox.width * b.boundingBox.height ? a : b);
@@ -80,7 +83,7 @@ class RealTimeFaceDetectionService {
         message: qualityResult.message,
         primaryFaceRect: primaryFace.boundingBox,
         confidence: qualityResult.confidence,
-        imageSize: inputImage.metadata!.size,
+        imageSize: imageSize,
       );
     } catch (e) {
       ErrorHandler.error('Face detection error', category: ErrorCategory.faceRecognition, tag: 'FACE_DETECTION_ERROR', error: e);
@@ -90,43 +93,48 @@ class RealTimeFaceDetectionService {
     }
   }
 
-  InputImage? _inputImageFromCameraImage(CameraImage image, CameraController cameraController) {
-    final camera = cameraController.description;
-    final sensorOrientation = camera.sensorOrientation;
-    
-    final rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-    if (rotation == null) return null;
+  // --- KÖK NEDENİ ÇÖZEN NİHAİ FONKSİYON ---
+  InputImage? _inputImageFromCameraImage(CameraImage image, CameraDescription cameraDescription) {
+    final platform = defaultTargetPlatform;
+    if (platform == TargetPlatform.android) {
+      final sensorOrientation = cameraDescription.sensorOrientation;
+      InputImageRotation? rotation;
+      if (cameraDescription.lensDirection == CameraLensDirection.front) {
+        rotation = InputImageRotationValue.fromRawValue((sensorOrientation + 180) % 360);
+      } else {
+        rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
+      }
+      if (rotation == null) return null;
 
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) return null;
+      final format = InputImageFormatValue.fromRawValue(image.format.raw);
+      if (format == null) return null;
 
-    if (image.planes.length == 1) {
-      return InputImage.fromBytes(
-        bytes: image.planes[0].bytes,
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: format,
-          bytesPerRow: image.planes[0].bytesPerRow,
-        ),
-      );
-    }
+      final planeData = image.planes.map(
+        (Plane plane) {
+          return InputImagePlaneMetadata(
+            bytesPerRow: plane.bytesPerRow,
+            height: plane.height,
+            width: plane.width,
+          );
+        },
+      ).toList();
 
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final Plane plane in image.planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    final bytes = allBytes.done().buffer.asUint8List();
-
-    return InputImage.fromBytes(
-      bytes: bytes,
-      metadata: InputImageMetadata(
+      final inputImageData = InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
         format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      ),
-    );
+        bytesPerRow: planeData[0].bytesPerRow,
+      );
+
+      final WriteBuffer allBytes = WriteBuffer();
+      for (final Plane plane in image.planes) {
+        allBytes.putUint8List(plane.bytes);
+      }
+      final bytes = allBytes.done().buffer.asUint8List();
+
+      return InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
+    }
+    return null; // Diğer platformlar için implementasyon eklenebilir.
   }
 
   FaceQualityResult _evaluateFaceQuality(Face face, CameraImage cameraImage) {

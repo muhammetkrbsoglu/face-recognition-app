@@ -5,12 +5,14 @@ import '../services/real_time_face_detection_service.dart';
 
 class RealTimeQualityOverlay extends StatefulWidget {
   final CameraController cameraController;
+  final CameraDescription cameraDescription; // Bu yeni parametre eklendi
   final Function(bool canCapture) onQualityChanged;
   final bool isCapturing;
 
   const RealTimeQualityOverlay({
     super.key,
     required this.cameraController,
+    required this.cameraDescription, // Bu yeni parametre eklendi
     required this.onQualityChanged,
     this.isCapturing = false,
   });
@@ -19,7 +21,7 @@ class RealTimeQualityOverlay extends StatefulWidget {
   State<RealTimeQualityOverlay> createState() => _RealTimeQualityOverlayState();
 }
 
-class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with TickerProviderStateMixin {
+class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
   FaceDetectionResult? _currentFaceResult;
   final RealTimeFaceDetectionService _faceDetectionService = RealTimeFaceDetectionService();
   bool _isServiceInitialized = false;
@@ -34,36 +36,40 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
   Future<void> _initializeFaceDetection() async {
     try {
       await _faceDetectionService.initialize();
-      setState(() {
-        _isServiceInitialized = true;
-      });
-      _startFaceDetection();
+      if(mounted) {
+        setState(() {
+          _isServiceInitialized = true;
+        });
+        _startFaceDetection();
+      }
     } catch (e) {
       debugPrint('Face detection initialization failed: $e');
     }
   }
 
   void _startFaceDetection() {
-    if (!_isServiceInitialized || !widget.cameraController.value.isStreamingImages) {
-      widget.cameraController.startImageStream((CameraImage image) {
-        if (!mounted || _isProcessingImage) return;
-        
-        _isProcessingImage = true;
-        _processCameraImage(image).whenComplete(() {
-          if (mounted) {
-            _isProcessingImage = false;
-          }
-        });
+    if (!_isServiceInitialized) return;
+    
+    // Zaten bir akış varsa başlatma
+    if (widget.cameraController.value.isStreamingImages) return;
+
+    widget.cameraController.startImageStream((CameraImage image) {
+      if (!mounted || _isProcessingImage) return;
+      
+      _isProcessingImage = true;
+      _processCameraImage(image).whenComplete(() {
+        if (mounted) {
+          _isProcessingImage = false;
+        }
       });
-    }
+    });
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
     try {
-      // DÜZELTME: Eksik olan 'cameraController' parametresi eklendi.
-      final result = await _faceDetectionService.detectFaces(image, widget.cameraController);
+      final result = await _faceDetectionService.detectFaces(image, widget.cameraDescription);
       
-      if (mounted) {
+      if (mounted && result != null) {
         setState(() {
           _currentFaceResult = result;
         });
@@ -76,8 +82,13 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
 
   @override
   void dispose() {
-    if(widget.cameraController.value.isStreamingImages){
-       widget.cameraController.stopImageStream();
+    // Hata almamak için güvenli bir şekilde akışı durdur
+    try {
+      if (widget.cameraController.value.isStreamingImages) {
+        widget.cameraController.stopImageStream();
+      }
+    } catch (e) {
+      debugPrint('Error stopping image stream in overlay: $e');
     }
     _faceDetectionService.dispose();
     super.dispose();
@@ -85,10 +96,9 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
 
   @override
   Widget build(BuildContext context) {
-    // DÜZELTME: Hatalı '_cameraInitialized' kontrolü kaldırıldı.
     if (_currentFaceResult == null) {
       return const Center(
-        child: Text("Kamera Başlatılıyor...", style: TextStyle(color: Colors.white, fontSize: 18))
+        child: Text("Yüz aranıyor...", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))
       );
     }
 
@@ -99,10 +109,8 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
             size: Size.infinite,
             painter: FaceBoxPainter(
               rect: _currentFaceResult!.primaryFaceRect!,
-              imageSize: Size(
-                widget.cameraController.value.previewSize!.width,
-                widget.cameraController.value.previewSize!.height,
-              ),
+              imageSize: _currentFaceResult!.imageSize,
+              cameraLensDirection: widget.cameraDescription.lensDirection,
               color: _faceDetectionService.getFaceFrameColor(_currentFaceResult!.confidence)
             ),
           ),
@@ -136,9 +144,10 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
 class FaceBoxPainter extends CustomPainter {
   final Rect rect;
   final Size imageSize;
+  final CameraLensDirection cameraLensDirection;
   final Color color;
 
-  FaceBoxPainter({required this.rect, required this.imageSize, required this.color});
+  FaceBoxPainter({required this.rect, required this.imageSize, required this.cameraLensDirection, required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -147,14 +156,19 @@ class FaceBoxPainter extends CustomPainter {
       ..strokeWidth = 3.0
       ..style = PaintingStyle.stroke;
     
-    final scaleX = size.width / imageSize.height;
-    final scaleY = size.height / imageSize.width;
+    final scaleX = size.width / imageSize.width;
+    final scaleY = size.height / imageSize.height;
 
-    final scaledRect = Rect.fromLTRB(
-      rect.left * scaleX,
+    // Ön kamera için görüntüyü yatayda çevir (ayna efekti)
+    final left = cameraLensDirection == CameraLensDirection.front
+        ? size.width - (rect.left * scaleX) - (rect.width * scaleX)
+        : rect.left * scaleX;
+    
+    final scaledRect = Rect.fromLTWH(
+      left,
       rect.top * scaleY,
-      rect.right * scaleX,
-      rect.bottom * scaleY,
+      rect.width * scaleX,
+      rect.height * scaleY,
     );
 
     canvas.drawRRect(
