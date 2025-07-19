@@ -1,4 +1,4 @@
-import 'dart.io';
+import 'dart:io'; // HATA DÜZELTİLDİ: 'dart.io' -> 'dart:io'
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:camera/camera.dart';
@@ -479,6 +479,8 @@ class _HomePageState extends State<HomePage> {
     );
   }
 }
+
+
 
 // ------------------------------------------------------------
 // Yönetici Sayfası

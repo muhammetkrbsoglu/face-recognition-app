@@ -14,7 +14,10 @@ dependencies:
 
   camera: ^0.10.5+9
   google_mlkit_face_detection: ^0.11.0
-  tflite_flutter: ^0.10.4
+  
+  # HATA BURADAYDI: Paket, SDK ile uyumlu olan ^0.11.0 versiyonuna yükseltildi.
+  tflite_flutter: ^0.11.0
+  
   image: ^4.1.7
   sqflite: ^2.3.2
   path_provider: ^2.1.2
@@ -24,8 +27,6 @@ dependencies:
   sqflite_sqlcipher: ^3.2.0
   http: ^1.2.1
   system_info2: ^3.0.0
-  
-  # EKLENDİ: Test sayfasının çalışması için gerekliydi.
   image_picker: ^1.0.7
 
   cupertino_icons: ^1.0.2
