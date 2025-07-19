@@ -203,6 +203,8 @@ class _HomePageState extends State<HomePage> {
   
   @override
   void dispose() {
+    // Kameranın görüntü akışını durdurduğumuzdan emin olalım
+    _cameraController?.stopImageStream();
     _cameraController?.dispose();
     super.dispose();
   }
@@ -384,15 +386,15 @@ class _HomePageState extends State<HomePage> {
       return const Center(child: Text('Kamera başlatılamadı', style: TextStyle(color: Colors.red)));
     }
     return Stack(
+      alignment: Alignment.center,
       children: [
-        if (_cameraInitialized && _cameraController != null)
-          // DÜZELTME: Kamera önizlemesini ekranı kaplayacak ve doğru en-boy oranında gösterecek şekilde güncelledik.
+        if (_cameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
           SizedBox.expand(
             child: FittedBox(
               fit: BoxFit.cover,
               child: SizedBox(
-                width: _cameraController!.value.size.width,
-                height: _cameraController!.value.size.height,
+                width: _cameraController!.value.previewSize!.height,
+                height: _cameraController!.value.previewSize!.width,
                 child: CameraPreview(_cameraController!),
               ),
             ),
@@ -400,7 +402,6 @@ class _HomePageState extends State<HomePage> {
         else
           const Center(child: CircularProgressIndicator()),
         
-        // DÜZELTME: RealTimeQualityOverlay'i Stack'in içine, kameranın üzerine ekledik.
         if (_cameraInitialized && _cameraController != null)
           RealTimeQualityOverlay(
             cameraController: _cameraController!,
@@ -414,15 +415,16 @@ class _HomePageState extends State<HomePage> {
             },
           ),
 
-        Align(
-          alignment: Alignment.bottomCenter,
+        Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.85),
+              color: Colors.black.withOpacity(0.5),
               borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 16)],
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -432,68 +434,36 @@ class _HomePageState extends State<HomePage> {
                   child: _processing
                       ? Container(
                           key: const ValueKey('loading'),
-                          width: 60,
-                          height: 60,
-                          alignment: Alignment.center,
-                          child: CircularProgressIndicator(
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.deepPurple),
+                          width: 70,
+                          height: 70,
+                          padding: const EdgeInsets.all(12),
+                          child: const CircularProgressIndicator(
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                             strokeWidth: 6,
                           ),
                         )
-                      : ElevatedButton.icon(
+                      : ElevatedButton(
                           key: const ValueKey('button'),
                           onPressed: _processing || !_cameraInitialized || !_canCapture ? null : _recognizeFace,
-                          icon: const Icon(Icons.face_retouching_natural),
-                          label: const Text(
-                            'Yüzü Tara',
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                              letterSpacing: 0.5,
-                              shadows: [Shadow(color: Colors.black26, blurRadius: 2)],
-                            ),
-                          ),
                           style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(200, 56),
+                            shape: const CircleBorder(),
+                            padding: const EdgeInsets.all(20),
                             backgroundColor: _canCapture ? Colors.deepPurple : Colors.grey,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            foregroundColor: Colors.white,
                           ),
+                          child: const Icon(Icons.camera_alt, size: 30),
                         ),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 12),
                 if (_resultMessage != null && !_processing)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: _resultMessage!.contains('Hoşgeldiniz') ? Colors.green.shade50 : Colors.red.shade50,
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                  Text(
+                    _resultMessage!,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          _resultMessage!.contains('Hoşgeldiniz') ? Icons.verified : Icons.error_outline,
-                          color: _resultMessage!.contains('Hoşgeldiniz') ? Colors.green : Colors.red,
-                          size: 26,
-                        ),
-                        const SizedBox(width: 10),
-                        Flexible(
-                          child: Text(
-                            _resultMessage!,
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: _resultMessage!.contains('Hoşgeldiniz') ? Colors.green.shade700 : Colors.red.shade700,
-                            ),
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
+                    textAlign: TextAlign.center,
                   ),
               ],
             ),
@@ -633,10 +603,19 @@ class _AdminPageState extends State<AdminPage> {
 
 
   Future<void> _showAddFaceDialog() async {
+    // dispose conflict'ini önlemek için kamerayı durdur
+    await _cameraController?.dispose();
+    setState(() {
+      _cameraInitialized = false;
+    });
+
     await showDialog(
       context: context,
       builder: (context) => AddFaceDialog(embeddingService: widget.embeddingService),
     );
+
+    // Dialog kapandıktan sonra kamerayı yeniden başlat
+    _initializeCamera();
   }
 
   Future<void> _showViewFacesDialog() async {
@@ -816,14 +795,13 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
               ),
               const SizedBox(height: 16),
               if (!isNameEntryStep) ...[
-                if (_cameraInitialized && _cameraController != null)
-                  // DÜZELTME: Kamera önizlemesini doğru en-boy oranında ve üzerinde overlay olacak şekilde güncelledik.
+                if (_cameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
                   SizedBox(
                     height: 320,
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(16),
                       child: AspectRatio(
-                        aspectRatio: _cameraController!.value.aspectRatio,
+                        aspectRatio: _cameraController!.value.previewSize!.height / _cameraController!.value.previewSize!.width,
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
