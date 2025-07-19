@@ -1,43 +1,50 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 import '../core/error_handler.dart';
 import '../core/exceptions.dart' as app_exceptions;
 import 'gpu_delegate_service.dart';
+import 'dart:math';
 
+/// TFLite modelini yöneten ve yüz embedding'i çıkaran merkezi servis.
+/// Bu servis, FaceRecognitionService ve FaceEmbeddingService'in birleştirilmiş ve iyileştirilmiş halidir.
 class FaceEmbeddingService {
+  static final FaceEmbeddingService _instance = FaceEmbeddingService._internal();
+  factory FaceEmbeddingService() => _instance;
+  FaceEmbeddingService._internal();
+
   Interpreter? _interpreter;
   static const String _modelPath = 'assets/models/arcface_512d.tflite';
   static const String _modelName = 'ArcFace 512D';
 
-  /// Model yükleme durumunu kontrol et
+  /// Modelin yüklenip yüklenmediğini kontrol eder.
   bool get isModelLoaded => _interpreter != null;
 
-  /// Model yükle
-  Future<void> loadModel() async {
-    try {
-      ErrorHandler.info(
-        'Model yükleniyor: $_modelName',
-        category: ErrorCategory.model,
-        tag: 'LOAD_START',
-      );
+  /// Geliştirme modunda detaylı loglama yapar.
+  void _debugLog(String message) {
+    // Sadece debug modunda konsola log basar.
+    if (kDebugMode) {
+      final timestamp = DateTime.now().toString().substring(11, 23);
+      debugPrint('[$timestamp] [FaceEmbeddingService] $message');
+    }
+  }
 
+  /// TFLite modelini hafızaya yükler.
+  Future<void> loadModel() async {
+    if (isModelLoaded) {
+      _debugLog('Model zaten yüklü, tekrar yükleme atlanıyor.');
+      return;
+    }
+    try {
+      _debugLog('Model yükleme başlıyor: $_modelName');
+      // GPU delegate ile modeli yükleyerek performansı artırır.
       _interpreter = await Interpreter.fromAsset(
         _modelPath,
         options: GpuDelegateService.getGpuOptions(),
       );
-
-      ErrorHandler.info(
-        'Model başarıyla yüklendi: $_modelName',
-        category: ErrorCategory.model,
-        tag: 'LOAD_SUCCESS',
-        metadata: {
-          'modelPath': _modelPath,
-          'inputShape': _interpreter!.getInputTensor(0).shape,
-          'outputShape': _interpreter!.getOutputTensor(0).shape,
-        },
-      );
+      _debugLog('Model başarıyla yüklendi: $_modelName');
     } catch (e, stackTrace) {
       ErrorHandler.error(
         'Model yükleme başarısız: $_modelName',
@@ -46,90 +53,68 @@ class FaceEmbeddingService {
         error: e,
         stackTrace: stackTrace,
       );
-      
       throw app_exceptions.ModelException.loadFailed(_modelName, e.toString());
     }
   }
+  
+  /// Verilen bir embedding vektörünü L2 normuna göre normalize eder.
+  /// Bu, kosinüs benzerliği hesaplamalarında doğruluğu artırır.
+  List<double> _normalize(List<double> embedding) {
+    final double norm = sqrt(embedding.map((e) => e * e).reduce((a, b) => a + b));
+    if (norm == 0) return embedding; // Sıfıra bölme hatasını önle
+    return embedding.map((e) => e / norm).toList();
+  }
 
-  /// Embedding çıkar
+  /// Bir görüntü dosyasından 512 boyutlu yüz embedding'i çıkarır.
   Future<List<double>> extractEmbedding(File imageFile) async {
+    if (!isModelLoaded) {
+      throw app_exceptions.FaceRecognitionException.modelNotLoaded();
+    }
+    if (!await imageFile.exists()) {
+      throw app_exceptions.FileSystemException.fileNotFound(imageFile.path);
+    }
+
     try {
-      // Model yüklü mü kontrol et
-      if (!isModelLoaded) {
-        throw app_exceptions.FaceRecognitionException.modelNotLoaded();
-      }
-
-      // Dosya varlığını kontrol et
-      if (!await imageFile.exists()) {
-        throw app_exceptions.FileSystemException.fileNotFound(imageFile.path);
-      }
-
-      ErrorHandler.debug(
-        'Embedding çıkarma başladı',
-        category: ErrorCategory.faceRecognition,
-        tag: 'EXTRACT_START',
-        metadata: {'imagePath': imageFile.path},
-      );
-
-      // Görüntü dosyasını oku
+      _debugLog('Embedding çıkarma başladı: ${imageFile.path}');
+      
+      // Görüntüyü oku ve işle
       final imageBytes = await imageFile.readAsBytes();
-      
-      // Görüntüyü decode et
-      img.Image? oriImage = img.decodeImage(imageBytes);
-      if (oriImage == null) {
-        throw app_exceptions.FaceRecognitionException.embeddingExtractionFailed('Görüntü decode edilemedi');
+      img.Image? originalImage = img.decodeImage(imageBytes);
+      if (originalImage == null) {
+        throw app_exceptions.FaceRecognitionException.embeddingExtractionFailed('Görüntü çözümlenemedi.');
       }
+      // Modeli giriş boyutuna (112x112) yeniden boyutlandır.
+      img.Image resizedImage = img.copyResize(originalImage, width: 112, height: 112);
 
-      // Görüntüyü model için yeniden boyutlandır (112x112)
-      img.Image face = img.copyResize(oriImage, width: 112, height: 112);
-      
-      // Normalize [0,255] -> [-1,1]
-      Float32List input = Float32List(112 * 112 * 3);
-      int idx = 0;
+      // Görüntüyü tensöre dönüştür (normalizasyon: [-1, 1])
+      Float32List imageAsFloat32List = Float32List(1 * 112 * 112 * 3);
+      int pixelIndex = 0;
       for (int y = 0; y < 112; y++) {
         for (int x = 0; x < 112; x++) {
-          final pixel = face.getPixel(x, y);
-          input[idx++] = ((pixel.r / 255.0) - 0.5) * 2.0;
-          input[idx++] = ((pixel.g / 255.0) - 0.5) * 2.0;
-          input[idx++] = ((pixel.b / 255.0) - 0.5) * 2.0;
+          final pixel = resizedImage.getPixel(x, y);
+          imageAsFloat32List[pixelIndex++] = (pixel.r - 127.5) / 127.5;
+          imageAsFloat32List[pixelIndex++] = (pixel.g - 127.5) / 127.5;
+          imageAsFloat32List[pixelIndex++] = (pixel.b - 127.5) / 127.5;
         }
       }
+      
+      final input = imageAsFloat32List.reshape([1, 112, 112, 3]);
+      final output = List.filled(1 * 512, 0.0).reshape([1, 512]);
 
-      // Model giriş ve çıkış şekillerini kontrol et
-      var inputShape = _interpreter!.getInputTensor(0).shape;
-      var outputShape = _interpreter!.getOutputTensor(0).shape;
+      // Modeli çalıştır
+      _interpreter!.run(input, output);
       
-      // Tensörleri hazırla
-      var inputTensor = input.reshape([1, 112, 112, 3]);
-      var outputTensor = List.filled(512, 0.0).reshape([1, 512]);
+      // Çıktıyı normalize et ve döndür
+      final embedding = _normalize(List<double>.from(output[0]));
+      _debugLog('Embedding başarıyla çıkarıldı. Uzunluk: ${embedding.length}');
       
-      // Model çalıştır
-      _interpreter!.run(inputTensor, outputTensor);
-      
-      // Embedding'i çıkar
-      final embedding = List<double>.from(outputTensor[0]);
-      
-      ErrorHandler.debug(
-        'Embedding başarıyla çıkarıldı',
-        category: ErrorCategory.faceRecognition,
-        tag: 'EXTRACT_SUCCESS',
-        metadata: {
-          'imagePath': imageFile.path,
-          'embeddingLength': embedding.length,
-          'embeddingPreview': embedding.sublist(0, 5).map((e) => e.toStringAsFixed(4)).join(', '),
-          'inputShape': inputShape,
-          'outputShape': outputShape,
-        },
-      );
-
       return embedding;
+
     } catch (e, stackTrace) {
-      // AppException türündeki hataları yeniden fırlat
-      if (e is app_exceptions.AppException) {
-        rethrow;
-      }
+      // Bilinen bir hata ise tekrar fırlat
+      if (e is app_exceptions.AppException) rethrow;
       
-      // Bilinmeyen hataları wrap et
+      // Bilinmeyen hataları logla ve özel bir istisna ile sarmala
       ErrorHandler.error(
         'Embedding çıkarma sırasında beklenmeyen hata',
         category: ErrorCategory.faceRecognition,
@@ -138,28 +123,16 @@ class FaceEmbeddingService {
         stackTrace: stackTrace,
         metadata: {'imagePath': imageFile.path},
       );
-      
       throw app_exceptions.FaceRecognitionException.embeddingExtractionFailed(e.toString());
     }
   }
 
-  /// Model'i temizle
+  /// Servis kaynaklarını (TFLite interpreter) temizler.
   void dispose() {
-    try {
+    if(isModelLoaded) {
       _interpreter?.close();
       _interpreter = null;
-      
-      ErrorHandler.debug(
-        'Model kaynakları temizlendi',
-        category: ErrorCategory.model,
-        tag: 'DISPOSE',
-      );
-    } catch (e) {
-      ErrorHandler.warning(
-        'Model kaynakları temizlenirken hata',
-        category: ErrorCategory.model,
-        tag: 'DISPOSE_ERROR',
-      );
+      _debugLog('Servis kaynakları temizlendi.');
     }
   }
 }
