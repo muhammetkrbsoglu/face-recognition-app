@@ -1,4 +1,4 @@
-import 'dart:io'; // HATA DÜZELTİLDİ: 'dart.io' -> 'dart:io'
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:camera/camera.dart';
@@ -193,6 +193,7 @@ class _HomePageState extends State<HomePage> {
   bool _processing = false;
   String? _resultMessage;
   bool _cameraError = false;
+  bool _canCapture = false;
 
   @override
   void initState() {
@@ -254,7 +255,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _recognizeFace() async {
-    if(!_cameraInitialized || _cameraController == null || _processing) return;
+    if(!_cameraInitialized || _cameraController == null || _processing || !_canCapture) return;
 
     setState(() {
       _processing = true;
@@ -385,11 +386,34 @@ class _HomePageState extends State<HomePage> {
     return Stack(
       children: [
         if (_cameraInitialized && _cameraController != null)
-          Center(
-            child: CameraPreview(_cameraController!),
+          // DÜZELTME: Kamera önizlemesini ekranı kaplayacak ve doğru en-boy oranında gösterecek şekilde güncelledik.
+          SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _cameraController!.value.size.width,
+                height: _cameraController!.value.size.height,
+                child: CameraPreview(_cameraController!),
+              ),
+            ),
           )
         else
           const Center(child: CircularProgressIndicator()),
+        
+        // DÜZELTME: RealTimeQualityOverlay'i Stack'in içine, kameranın üzerine ekledik.
+        if (_cameraInitialized && _cameraController != null)
+          RealTimeQualityOverlay(
+            cameraController: _cameraController!,
+            isCapturing: _processing,
+            onQualityChanged: (canCapture) {
+              if (mounted) {
+                setState(() {
+                  _canCapture = canCapture;
+                });
+              }
+            },
+          ),
+
         Align(
           alignment: Alignment.bottomCenter,
           child: Container(
@@ -418,7 +442,7 @@ class _HomePageState extends State<HomePage> {
                         )
                       : ElevatedButton.icon(
                           key: const ValueKey('button'),
-                          onPressed: _processing || !_cameraInitialized ? null : _recognizeFace,
+                          onPressed: _processing || !_cameraInitialized || !_canCapture ? null : _recognizeFace,
                           icon: const Icon(Icons.face_retouching_natural),
                           label: const Text(
                             'Yüzü Tara',
@@ -432,7 +456,7 @@ class _HomePageState extends State<HomePage> {
                           ),
                           style: ElevatedButton.styleFrom(
                             minimumSize: const Size(200, 56),
-                            backgroundColor: Colors.deepPurple,
+                            backgroundColor: _canCapture ? Colors.deepPurple : Colors.grey,
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                           ),
                         ),
@@ -479,8 +503,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 }
-
-
 
 // ------------------------------------------------------------
 // Yönetici Sayfası
@@ -636,18 +658,18 @@ class AddFaceDialog extends StatefulWidget {
 }
 
 class _AddFaceDialogState extends State<AddFaceDialog> {
-  final int _currentStep = 0;
+  int _currentStep = 0;
   final List<String> _poseLabels = ['Düz Bakış', 'Sağa Bakış', 'Sola Bakış', 'Aşağı Bakış', 'Yukarı Bakış'];
   final List<XFile?> _capturedImages = List<XFile?>.filled(5, null);
   final TextEditingController _nameController = TextEditingController();
   String _selectedGender = 'male';
   bool _isSaving = false;
   CameraController? _cameraController;
-  final bool _cameraInitialized = false;
-  final bool _cameraError = false;
+  bool _cameraInitialized = false;
+  bool _cameraError = false;
   
-  final bool _canCapture = false;
-  final bool _isCapturing = false;
+  bool _canCapture = false;
+  bool _isCapturing = false;
 
   @override
   void initState() {
@@ -656,7 +678,26 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
   }
 
   Future<void> _initializeCamera() async {
-    // ...
+    try {
+      final cameras = await availableCameras();
+      final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
+      _cameraController = CameraController(
+        frontCamera, 
+        ResolutionPreset.medium,
+        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.yuv420 : ImageFormatGroup.bgra8888,
+      );
+      await _cameraController!.initialize();
+      if (!mounted) return;
+      setState(() {
+        _cameraInitialized = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _cameraError = true;
+      });
+      if(mounted) ErrorHandler.showError(context, 'Kamera başlatılamadı.');
+    }
   }
 
   @override
@@ -667,19 +708,56 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
   }
 
   Future<void> _captureImage() async {
-    // ...
+    if (!_cameraInitialized || _cameraController == null || _isCapturing || !_canCapture) return;
+    
+    setState(() {
+      _isCapturing = true;
+    });
+    
+    try {
+      final image = await _cameraController!.takePicture();
+      
+      final qualityResult = await RealTimeQualityService.assessQuality(File(image.path));
+      
+      if (qualityResult.status == QualityStatus.rejected ||
+          qualityResult.status == QualityStatus.poor) {
+        if (mounted) ErrorHandler.showWarning(context, 'Fotoğraf kalitesi uygun değil: ${qualityResult.message}');
+        return;
+      }
+      
+      if (qualityResult.status == QualityStatus.acceptable) {
+        if (mounted) ErrorHandler.showInfo(context, 'Fotoğraf kabul edilebilir kalitede: ${qualityResult.message}');
+      }
+      
+      if (!mounted) return;
+      setState(() {
+        _capturedImages[_currentStep] = image;
+      });
+      
+      if (mounted) ErrorHandler.showSuccess(context, '✅ ${_poseLabels[_currentStep]} fotoğrafı çekildi!');
+      
+      if (_currentStep < 4) {
+        setState(() {
+          _currentStep++;
+        });
+      }
+    } catch (e) {
+      if (mounted) ErrorHandler.showError(context, 'Fotoğraf çekilemedi: $e');
+    } finally {
+      if(mounted) setState(() => _isCapturing = false);
+    }
   }
 
   Future<void> _saveFace() async {
     if (_nameController.text.trim().isEmpty) {
-      if (mounted) ErrorHandler.showWarning(context, "Lütfen isim giriniz.");
+      if (mounted) ErrorHandler.showWarning(context, 'Lütfen isim giriniz');
       return;
     }
     if (_capturedImages.any((img) => img == null)) {
-      if (mounted) ErrorHandler.showWarning(context, "Lütfen tüm 5 pozu da çekiniz.");
+      if (mounted) ErrorHandler.showWarning(context, 'Lütfen tüm pozların fotoğrafını çekiniz');
       return;
     }
-    if(mounted) setState(() => _isSaving = true);
+    setState(() => _isSaving = true);
     try {
       final imagePaths = _capturedImages.map((img) => img!.path).toList();
       final name = _nameController.text.trim();
@@ -700,7 +778,7 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
       for (int i = 0; i < averageEmbedding.length; i++) {
         averageEmbedding[i] /= embeddings.length;
       }
-
+      
       final face = FaceModel(
         name: name,
         gender: gender,
@@ -709,12 +787,12 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
       );
       
       await FaceDatabaseService.insertFace(face);
-      if(mounted) {
+      if (mounted) {
         ErrorHandler.showSuccess(context, 'Yüz başarıyla kaydedildi!');
         Navigator.of(context).pop();
       }
     } catch (e) {
-      if(mounted) ErrorHandler.showError(context, 'Yüz kaydedilemedi: $e');
+      if (mounted) ErrorHandler.showError(context, 'Yüz kaydedilemedi: $e');
     } finally {
       if(mounted) setState(() => _isSaving = false);
     }
@@ -722,8 +800,118 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
 
   @override
   Widget build(BuildContext context) {
-    // ...
-    return const Placeholder(); // Bu widget'ın UI'ı önceki versiyonlardaki gibi kalabilir.
+    final isNameEntryStep = _capturedImages.every((img) => img != null);
+    
+    return Dialog(
+      insetPadding: const EdgeInsets.all(16.0),
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                isNameEntryStep ? 'Bilgileri Girin' : 'Yüz Ekle (${_currentStep + 1}/5)',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 16),
+              if (!isNameEntryStep) ...[
+                if (_cameraInitialized && _cameraController != null)
+                  // DÜZELTME: Kamera önizlemesini doğru en-boy oranında ve üzerinde overlay olacak şekilde güncelledik.
+                  SizedBox(
+                    height: 320,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: AspectRatio(
+                        aspectRatio: _cameraController!.value.aspectRatio,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            CameraPreview(_cameraController!),
+                            RealTimeQualityOverlay(
+                              cameraController: _cameraController!,
+                              isCapturing: _isCapturing,
+                              onQualityChanged: (canCapture) {
+                                if (mounted) {
+                                  setState(() {
+                                    _canCapture = canCapture;
+                                  });
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else
+                  const SizedBox(height: 320, child: Center(child: CircularProgressIndicator())),
+                const SizedBox(height: 8),
+                Text(_poseLabels[_currentStep]),
+                const SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: _isCapturing || !_canCapture ? null : _captureImage,
+                  icon: _isCapturing ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.camera_alt),
+                  label: const Text('Fotoğraf Çek'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _canCapture ? Colors.deepPurple : Colors.grey,
+                  ),
+                ),
+              ] else ...[
+                const Text('Kayıtlı kişinin adını ve cinsiyetini girin.'),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'İsim',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text('Cinsiyet:'),
+                    Radio<String>(
+                      value: 'male',
+                      groupValue: _selectedGender,
+                      onChanged: (val) {
+                        if (val != null) setState(() => _selectedGender = val);
+                      },
+                    ),
+                    const Text('Erkek'),
+                    Radio<String>(
+                      value: 'female',
+                      groupValue: _selectedGender,
+                      onChanged: (val) {
+                        if (val != null) setState(() => _selectedGender = val);
+                      },
+                    ),
+                    const Text('Kadın'),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('İptal'),
+                  ),
+                  const SizedBox(width: 8),
+                  if (isNameEntryStep)
+                    ElevatedButton(
+                      onPressed: _isSaving ? null : _saveFace,
+                      child: _isSaving ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Kaydet'),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -774,7 +962,39 @@ class _ViewFacesDialogState extends State<ViewFacesDialog> {
 
   @override
   Widget build(BuildContext context) {
-    // ...
-    return const Placeholder(); // Bu widget'ın UI'ı önceki versiyonlardaki gibi kalabilir.
+    return AlertDialog(
+      title: const Text('Kayıtlı Yüzler'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _faces.isEmpty
+                ? const Center(child: Text('Kayıtlı yüz bulunamadı.'))
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _faces.length,
+                    itemBuilder: (context, index) {
+                      final face = _faces[index];
+                      return ListTile(
+                        leading: face.imagePaths.isNotEmpty
+                            ? CircleAvatar(backgroundImage: FileImage(File(face.imagePaths[0])))
+                            : const CircleAvatar(child: Icon(Icons.person)),
+                        title: Text(face.name),
+                        subtitle: Text(face.gender == 'male' ? 'Erkek' : 'Kadın'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => _deleteFace(face),
+                        ),
+                      );
+                    },
+                  ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Kapat'),
+        ),
+      ],
+    );
   }
 }

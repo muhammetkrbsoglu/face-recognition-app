@@ -1,7 +1,9 @@
-// HATA BURADAYDI: Paket adı projenin kimliğiyle eşleşecek şekilde güncellendi.
 package com.example.akilli_kapi_guvenlik_sistemi
 
-import io.flutter.embedding.android.FlutterActivity
+// HATA BURADAYDI: io.flutter.embedding.android.FlutterActivity
+// yerine io.flutter.embedding.android.FlutterFragmentActivity import edildi.
+import io.flutter.embedding.android.FlutterFragmentActivity
 
-class MainActivity: FlutterActivity() {
+// MainActivity sınıfı artık FlutterFragmentActivity'den türetiliyor.
+class MainActivity: FlutterFragmentActivity() {
 }
