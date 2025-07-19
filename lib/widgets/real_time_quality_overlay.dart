@@ -76,7 +76,6 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
 
   @override
   void dispose() {
-    // Görüntü akışını durdurduğumuzdan emin olalım
     if(widget.cameraController.value.isStreamingImages){
        widget.cameraController.stopImageStream();
     }
@@ -86,7 +85,8 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> with Ti
 
   @override
   Widget build(BuildContext context) {
-    if (_currentFaceResult == null || !_cameraInitialized) {
+    // DÜZELTME: Hatalı '_cameraInitialized' kontrolü kaldırıldı.
+    if (_currentFaceResult == null) {
       return const Center(
         child: Text("Kamera Başlatılıyor...", style: TextStyle(color: Colors.white, fontSize: 18))
       );
@@ -147,7 +147,6 @@ class FaceBoxPainter extends CustomPainter {
       ..strokeWidth = 3.0
       ..style = PaintingStyle.stroke;
     
-    // Ön kameradan gelen görüntü yatay olduğu için koordinatları çeviriyoruz.
     final scaleX = size.width / imageSize.height;
     final scaleY = size.height / imageSize.width;
 
@@ -167,4 +166,3 @@ class FaceBoxPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
-

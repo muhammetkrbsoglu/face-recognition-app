@@ -4,13 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import '../core/error_handler.dart';
 
-// ... (FaceDetectionResult ve FaceQualityResult sınıfları aynı kalabilir)
 class FaceDetectionResult {
   final List<Face> faces;
   final bool hasQualityFace;
   final String message;
   final Rect? primaryFaceRect;
   final double confidence;
+  final Size imageSize;
 
   FaceDetectionResult({
     required this.faces,
@@ -18,6 +18,7 @@ class FaceDetectionResult {
     required this.message,
     this.primaryFaceRect,
     required this.confidence,
+    required this.imageSize,
   });
 }
 
@@ -53,23 +54,21 @@ class RealTimeFaceDetectionService {
     _faceDetector = FaceDetector(options: options);
   }
 
-  Future<FaceDetectionResult> detectFaces(CameraImage cameraImage, CameraController cameraController) async {
+  Future<FaceDetectionResult?> detectFaces(CameraImage cameraImage, CameraController cameraController) async {
     if (_isProcessing || _faceDetector == null) {
-      return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'İşlem devam ediyor...', confidence: 0.0);
+      return null;
     }
 
     _isProcessing = true;
     try {
       final inputImage = _inputImageFromCameraImage(cameraImage, cameraController);
       if (inputImage == null) {
-        _isProcessing = false;
-        return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Kamera görüntüsü işlenemedi', confidence: 0.0);
+        return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Kamera görüntüsü işlenemedi', confidence: 0.0, imageSize: Size.zero);
       }
 
       final faces = await _faceDetector!.processImage(inputImage);
       if (faces.isEmpty) {
-        _isProcessing = false;
-        return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0);
+        return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0, imageSize: inputImage.metadata!.size);
       }
 
       Face? primaryFace = faces.reduce((a, b) => a.boundingBox.width * a.boundingBox.height > b.boundingBox.width * b.boundingBox.height ? a : b);
@@ -81,30 +80,26 @@ class RealTimeFaceDetectionService {
         message: qualityResult.message,
         primaryFaceRect: primaryFace.boundingBox,
         confidence: qualityResult.confidence,
+        imageSize: inputImage.metadata!.size,
       );
     } catch (e) {
       ErrorHandler.error('Face detection error', category: ErrorCategory.faceRecognition, tag: 'FACE_DETECTION_ERROR', error: e);
-      return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Yüz tespiti hatası: $e', confidence: 0.0);
+      return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Yüz tespiti hatası: $e', confidence: 0.0, imageSize: Size.zero);
     } finally {
       _isProcessing = false;
     }
   }
 
-  // --- KRİTİK DÜZELTME: Bu fonksiyon, kamera ve cihaz oryantasyonunu doğru bir şekilde hesaplar. ---
   InputImage? _inputImageFromCameraImage(CameraImage image, CameraController cameraController) {
     final camera = cameraController.description;
     final sensorOrientation = camera.sensorOrientation;
     
-    // Cihazın mevcut oryantasyonunu al
-    // Not: Bu, cihazın dikey tutulduğu varsayımıyla çalışır. Tam bir çözüm için
-    // `deviceOrientation` değişikliklerini dinlemek gerekir, ancak bu çoğu durum için yeterlidir.
     final rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
     if (rotation == null) return null;
 
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
     if (format == null) return null;
 
-    // Tek düzlemli formatlar için (örn. bgra8888 on iOS)
     if (image.planes.length == 1) {
       return InputImage.fromBytes(
         bytes: image.planes[0].bytes,
@@ -117,7 +112,6 @@ class RealTimeFaceDetectionService {
       );
     }
 
-    // Çok düzlemli formatlar için (örn. yuv420 on Android)
     final WriteBuffer allBytes = WriteBuffer();
     for (final Plane plane in image.planes) {
       allBytes.putUint8List(plane.bytes);
@@ -138,7 +132,6 @@ class RealTimeFaceDetectionService {
   FaceQualityResult _evaluateFaceQuality(Face face, CameraImage cameraImage) {
     List<String> issues = [];
     double totalScore = 0;
-    const int checkCount = 4; // Toplam kontrol sayısı
 
     final faceArea = face.boundingBox.width * face.boundingBox.height;
     final imageArea = cameraImage.width * cameraImage.height;
@@ -167,7 +160,6 @@ class RealTimeFaceDetectionService {
       totalScore += 25.0;
     }
 
-    // Yüzün merkezde olup olmaması
     final faceCenterX = face.boundingBox.left + face.boundingBox.width / 2;
     final imageCenterX = cameraImage.width / 2;
     final centerDelta = (faceCenterX - imageCenterX).abs() / imageCenterX;
