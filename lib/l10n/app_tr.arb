@@ -1,0 +1,17 @@
+{
+  "appTitle": "Yüz Tanıma Kapı Açma Sistemi",
+  "startRecognition": "Yüz Tanımayı Başlat",
+  "cameraPermission": "Kamera izni gerekli",
+  "faceNotFound": "Yüz bulunamadı",
+  "doorUnlocked": "Kapı açıldı",
+  "error": "Bir hata oluştu",
+  "adminLogin": "Yönetici Girişi",
+  "addNewFace": "Yeni Yüz Ekle",
+  "viewRegisteredFaces": "Kayıtlı Yüzleri Görüntüle",
+  "rename": "Yeniden Adlandır",
+  "delete": "Sil",
+  "faceSaved": "Yüz kaydedildi",
+  "faceDeleted": "Yüz silindi",
+  "faceRenamed": "Yüz adı değiştirildi",
+  "loading": "Yükleniyor..."
+}
