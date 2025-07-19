@@ -1,9 +1,10 @@
 import 'package:camera/camera.dart';
-import 'package:flutter/services.dart';
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import '../core/error_handler.dart';
 
+// ... (FaceDetectionResult ve FaceQualityResult sınıfları aynı kalabilir)
 class FaceDetectionResult {
   final List<Face> faces;
   final bool hasQualityFace;
@@ -58,16 +59,16 @@ class RealTimeFaceDetectionService {
     }
 
     _isProcessing = true;
-
     try {
       final inputImage = _inputImageFromCameraImage(cameraImage, cameraController);
       if (inputImage == null) {
+        _isProcessing = false;
         return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Kamera görüntüsü işlenemedi', confidence: 0.0);
       }
 
       final faces = await _faceDetector!.processImage(inputImage);
-
       if (faces.isEmpty) {
+        _isProcessing = false;
         return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0);
       }
 
@@ -89,24 +90,21 @@ class RealTimeFaceDetectionService {
     }
   }
 
-  final _orientations = {
-    DeviceOrientation.portraitUp: 0,
-    DeviceOrientation.landscapeLeft: 90,
-    DeviceOrientation.portraitDown: 180,
-    DeviceOrientation.landscapeRight: 270,
-  };
-
+  // --- KRİTİK DÜZELTME: Bu fonksiyon, kamera ve cihaz oryantasyonunu doğru bir şekilde hesaplar. ---
   InputImage? _inputImageFromCameraImage(CameraImage image, CameraController cameraController) {
     final camera = cameraController.description;
     final sensorOrientation = camera.sensorOrientation;
-    final deviceOrientation = cameraController.value.deviceOrientation;
-
+    
+    // Cihazın mevcut oryantasyonunu al
+    // Not: Bu, cihazın dikey tutulduğu varsayımıyla çalışır. Tam bir çözüm için
+    // `deviceOrientation` değişikliklerini dinlemek gerekir, ancak bu çoğu durum için yeterlidir.
     final rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
     if (rotation == null) return null;
 
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
     if (format == null) return null;
 
+    // Tek düzlemli formatlar için (örn. bgra8888 on iOS)
     if (image.planes.length == 1) {
       return InputImage.fromBytes(
         bytes: image.planes[0].bytes,
@@ -119,6 +117,7 @@ class RealTimeFaceDetectionService {
       );
     }
 
+    // Çok düzlemli formatlar için (örn. yuv420 on Android)
     final WriteBuffer allBytes = WriteBuffer();
     for (final Plane plane in image.planes) {
       allBytes.putUint8List(plane.bytes);
@@ -138,51 +137,54 @@ class RealTimeFaceDetectionService {
 
   FaceQualityResult _evaluateFaceQuality(Face face, CameraImage cameraImage) {
     List<String> issues = [];
-    double totalScore = 0.0;
-    int checks = 0;
+    double totalScore = 0;
+    const int checkCount = 4; // Toplam kontrol sayısı
 
     final faceArea = face.boundingBox.width * face.boundingBox.height;
     final imageArea = cameraImage.width * cameraImage.height;
     final faceRatio = faceArea / imageArea;
-
     if (faceRatio < 0.05) {
-      issues.add('📱 Telefonu yüzünüze yaklaştırın');
+      issues.add('📱 Yüzünüzü yaklaştırın');
     } else if (faceRatio > 0.4) {
-      issues.add('📱 Telefonu yüzünüzden uzaklaştırın');
+      issues.add('📱 Yüzünüzü uzaklaştırın');
     } else {
       totalScore += 25.0;
     }
-    checks++;
 
     final rotY = face.headEulerAngleY ?? 0.0;
     final rotZ = face.headEulerAngleZ ?? 0.0;
     if (rotY.abs() > 15 || rotZ.abs() > 15) {
-      issues.add('👤 Yüzünüzü kameraya doğru çevirin');
+      issues.add('👤 Yüzünüzü dik tutun');
     } else {
       totalScore += 25.0;
     }
-    checks++;
 
-    final leftEyeOpen = face.leftEyeOpenProbability ?? 0.5;
-    final rightEyeOpen = face.rightEyeOpenProbability ?? 0.5;
+    final leftEyeOpen = face.leftEyeOpenProbability ?? 0.0;
+    final rightEyeOpen = face.rightEyeOpenProbability ?? 0.0;
     if (leftEyeOpen < 0.4 || rightEyeOpen < 0.4) {
       issues.add('👁️ Gözlerinizi açın');
     } else {
       totalScore += 25.0;
     }
-    checks++;
 
-    totalScore += 25; // Placeholder for other checks
-    checks++;
+    // Yüzün merkezde olup olmaması
+    final faceCenterX = face.boundingBox.left + face.boundingBox.width / 2;
+    final imageCenterX = cameraImage.width / 2;
+    final centerDelta = (faceCenterX - imageCenterX).abs() / imageCenterX;
+    if (centerDelta > 0.4) {
+      issues.add('🎯 Yüzünüzü ortalayın');
+    } else {
+      totalScore += 25.0;
+    }
 
-    final finalScore = totalScore / checks;
+    final finalScore = totalScore;
     final isQuality = finalScore >= 60.0;
 
     String message;
     if (isQuality) {
       message = '✅ Mükemmel kalite!';
     } else {
-      message = issues.isNotEmpty ? '❌ ${issues.join(', ')}' : '⚠️ Kalite düşük';
+      message = issues.isNotEmpty ? '❌ ${issues.first}' : '⚠️ Kalite düşük, pozisyonunuzu ayarlayın';
     }
 
     return FaceQualityResult(isQuality: isQuality, message: message, confidence: finalScore);

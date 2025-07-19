@@ -203,7 +203,6 @@ class _HomePageState extends State<HomePage> {
   
   @override
   void dispose() {
-    // Kameranın görüntü akışını durdurduğumuzdan emin olalım
     _cameraController?.stopImageStream();
     _cameraController?.dispose();
     super.dispose();
@@ -600,22 +599,13 @@ class _AdminPageState extends State<AdminPage> {
     );
   }
 
-
-
+  // DÜZELTME: AdminPage'in kamerasını yönetme mantığı kaldırıldı,
+  // çünkü AdminPage'in kendisi bir kamera kullanmıyor.
   Future<void> _showAddFaceDialog() async {
-    // dispose conflict'ini önlemek için kamerayı durdur
-    await _cameraController?.dispose();
-    setState(() {
-      _cameraInitialized = false;
-    });
-
     await showDialog(
       context: context,
       builder: (context) => AddFaceDialog(embeddingService: widget.embeddingService),
     );
-
-    // Dialog kapandıktan sonra kamerayı yeniden başlat
-    _initializeCamera();
   }
 
   Future<void> _showViewFacesDialog() async {
