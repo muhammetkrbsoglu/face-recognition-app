@@ -4,16 +4,22 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
-// HATA DÜZELTMESİ: Eksik kategoriler eklendi.
+// HATA DÜZELTMESİ: Hata raporundaki tüm eksik kategoriler eklendi.
 enum ErrorCategory {
   general,
   camera,
   database,
   faceRecognition,
-  faceDetection, // Eklendi
-  imageProcessing, // Eklendi
+  faceDetection,
+  imageProcessing,
   network,
   file,
+  authentication,
+  fileSystem,
+  model,
+  validation,
+  system,
+  performance,
 }
 
 enum LogLevel {
@@ -36,7 +42,6 @@ class ErrorHandler {
       try {
         final directory = await getApplicationDocumentsDirectory();
         _logFilePath = '${directory.path}/app_logs.txt';
-        // Başlangıçta eski log dosyasını temizle
         final file = File(_logFilePath!);
         if (await file.exists()) {
           await file.writeAsString('');
@@ -61,16 +66,14 @@ class ErrorHandler {
     final logMessage =
         '[$now] [${level.name.toUpperCase()}] [${category.name.toUpperCase()}] $message';
     
-    // Konsola log bas
     developer.log(
       logMessage,
       name: 'AppLogger',
       error: error,
       stackTrace: stackTrace,
-      level: level.index * 500, // Developer log seviyeleri için bir eşleme
+      level: level.index * 500,
     );
 
-    // Dosyaya log bas
     if (_logToFile && _logFilePath != null) {
       try {
         final file = File(_logFilePath!);

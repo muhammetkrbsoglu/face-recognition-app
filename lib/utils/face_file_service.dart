@@ -41,7 +41,8 @@ class FaceFileService {
 
     } catch (e, s) {
       ErrorHandler.log('Yüz resmi kaydedilemedi.', error: e, stackTrace: s, category: ErrorCategory.file);
-      throw FileSystemException('Yüz resmi dosyaya kaydedilirken bir hata oluştu.');
+      // HATA DÜZELTMESİ: Exception doğru parametre ile çağrıldı.
+      throw FileSystemException(message: 'Yüz resmi dosyaya kaydedilirken bir hata oluştu.');
     }
   }
 }

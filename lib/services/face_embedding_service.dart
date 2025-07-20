@@ -1,118 +1,92 @@
-import 'dart:async';
-import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:akilli_kapi_guvenlik_sistemi/core/error_handler.dart';
-// HATA DÜZELTMESİ: Kendi exception sınıfımızı kullanmak için sqflite'ınkini gizliyoruz.
-import 'package:akilli_kapi_guvenlik_sistemi/core/exceptions.dart' as custom_exceptions;
-import 'package:akilli_kapi_guvenlik_sistemi/models/face_model.dart';
-import 'package:path/path.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/core/exceptions.dart';
+import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:tflite_flutter/tflite_flutter.dart';
 
-/// Yüz verilerini yerel SQLite veritabanında yöneten servis.
-class FaceDatabaseService {
+/// Yüz görüntülerinden embedding vektörleri çıkaran servis.
+class FaceEmbeddingService {
   // Singleton pattern
-  FaceDatabaseService._privateConstructor();
-  static final FaceDatabaseService instance =
-      FaceDatabaseService._privateConstructor();
+  FaceEmbeddingService._privateConstructor();
+  static final FaceEmbeddingService instance =
+      FaceEmbeddingService._privateConstructor();
 
-  static Database? _database;
-  static const String _dbName = 'faces.db';
-  static const String _tableName = 'faces';
+  Interpreter? _interpreter;
+  static const String _modelPath = 'assets/models/facenet.tflite';
+  static const int _inputSize = 112;
+  static const int _outputSize = 512;
 
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await initialize();
-    return _database!;
+  /// Modeli yükler ve servisi başlatır.
+  Future<void> initialize() async {
+    try {
+      _interpreter = await Interpreter.fromAsset(_modelPath);
+      ErrorHandler.log('FaceNet modeli başarıyla yüklendi.',
+          level: LogLevel.info);
+    } catch (e, s) {
+      ErrorHandler.log('TFLite modeli yüklenemedi: $_modelPath',
+          error: e, stackTrace: s, category: ErrorCategory.model);
+      throw ModelLoadException(
+          message: 'FaceNet modeli yüklenirken bir hata oluştu.');
+    }
   }
 
-  /// Veritabanını başlatır. Eğer mevcut değilse oluşturur ve tabloyu kurar.
-  Future<Database> initialize() async {
-    final path = join(await getDatabasesPath(), _dbName);
-    return await openDatabase(
-      path,
-      version: 2,
-      onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
-    );
+  /// Verilen bir görüntüden 512 boyutlu bir embedding vektörü çıkarır.
+  Future<Float32List?> getEmbeddingsFromImage(img.Image image) async {
+    if (_interpreter == null) {
+      ErrorHandler.log('Interpreter başlatılmamış.',
+          level: LogLevel.error, category: ErrorCategory.model);
+      throw ModelNotLoadedException(
+          message: 'Embedding servisi başlatılmamış.');
+    }
+    try {
+      // Görüntüyü modelin istediği formata getir (112x112 RGB)
+      final img.Image resizedImage =
+          img.copyResize(image, width: _inputSize, height: _inputSize);
+      final Float32List imageBuffer = _imageToFloat32List(resizedImage);
+
+      // Giriş ve çıkış tensörlerini hazırla
+      final input = imageBuffer.reshape([1, _inputSize, _inputSize, 3]);
+      final output = List.filled(1 * _outputSize, 0.0)
+          .reshape([1, _outputSize]);
+
+      // Modeli çalıştır
+      _interpreter!.run(input, output);
+
+      return (output[0] as List<double>).toFloat32List();
+    } catch (e, s) {
+      ErrorHandler.log('Embedding oluşturma hatası',
+          error: e, stackTrace: s, category: ErrorCategory.faceRecognition);
+      return null;
+    }
   }
 
-  /// Veritabanı ilk kez oluşturulduğunda çalışır.
-  Future<void> _onCreate(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE $_tableName (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        gender TEXT NOT NULL,
-        imagePath TEXT NOT NULL,
-        embeddings TEXT NOT NULL
-      )
-    ''');
-  }
-
-  /// Veritabanı sürümü yükseltildiğinde çalışır.
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
-      try {
-        await db.execute('ALTER TABLE $_tableName ADD COLUMN gender TEXT NOT NULL DEFAULT "Belirtilmedi"');
-      } catch (e) {
-         ErrorHandler.log("'gender' sütunu zaten mevcut olabilir.", level: LogLevel.warning);
+  /// Bir `img.Image` nesnesini TFLite modelinin girdisi için Float32List'e dönüştürür.
+  /// Piksel değerlerini normalize eder (0-255 aralığından -1 ile 1 aralığına).
+  Float32List _imageToFloat32List(img.Image image) {
+    var buffer = Float32List(_inputSize * _inputSize * 3);
+    var bufferIndex = 0;
+    for (var y = 0; y < _inputSize; y++) {
+      for (var x = 0; x < _inputSize; x++) {
+        var pixel = image.getPixel(x, y);
+        buffer[bufferIndex++] = (pixel.r - 127.5) / 127.5;
+        buffer[bufferIndex++] = (pixel.g - 127.5) / 127.5;
+        buffer[bufferIndex++] = (pixel.b - 127.5) / 127.5;
       }
     }
+    return buffer;
   }
 
-  /// Veritabanına yeni bir yüz kaydı ekler.
-  Future<void> insertFace(FaceModel face) async {
-    try {
-      final db = await database;
-      await db.insert(
-        _tableName,
-        face.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    } catch (e, s) {
-      ErrorHandler.log('Veritabanına yüz eklenemedi.', error: e, stackTrace: s, category: ErrorCategory.database);
-      // HATA DÜZELTMESİ: Kendi exception sınıfımızı doğru şekilde çağırıyoruz.
-      throw custom_exceptions.DatabaseException(message: 'Veritabanına kayıt eklenirken bir hata oluştu.');
-    }
+  /// Servisi sonlandırır ve kaynakları serbest bırakır.
+  void dispose() {
+    _interpreter?.close();
   }
+}
 
-  /// Veritabanındaki tüm yüz kayıtlarını getirir.
-  Future<List<FaceModel>> getAllFaces() async {
-    try {
-      final db = await database;
-      final List<Map<String, dynamic>> maps = await db.query(_tableName);
-      return List.generate(maps.length, (i) {
-        return FaceModel.fromMap(maps[i]);
-      });
-    } catch (e, s) {
-       ErrorHandler.log('Veritabanından yüzler okunamadı.', error: e, stackTrace: s, category: ErrorCategory.database);
-       throw custom_exceptions.DatabaseException(message: 'Veritabanından kayıtlar okunurken bir hata oluştu.');
-    }
-  }
-
-  /// Belirtilen ID'ye sahip yüz kaydını siler.
-  Future<void> deleteFace(int id) async {
-    try {
-      final db = await database;
-      await db.delete(
-        _tableName,
-        where: 'id = ?',
-        whereArgs: [id],
-      );
-    } catch (e, s) {
-      ErrorHandler.log('Veritabanından yüz silinemedi.', error: e, stackTrace: s, category: ErrorCategory.database);
-      throw custom_exceptions.DatabaseException(message: 'Veritabanından kayıt silinirken bir hata oluştu.');
-    }
-  }
-
-  /// Veritabanındaki tüm kayıtları siler (Test veya sıfırlama için).
-  Future<void> deleteAllFaces() async {
-    try {
-      final db = await database;
-      await db.delete(_tableName);
-    } catch (e, s) {
-      ErrorHandler.log('Veritabanındaki tüm yüzler silinemedi.', error: e, stackTrace: s, category: ErrorCategory.database);
-      throw custom_exceptions.DatabaseException(message: 'Veritabanı temizlenirken bir hata oluştu.');
-    }
+// Helper extension for Float32List conversion
+extension on List<double> {
+  Float32List toFloat32List() {
+    return Float32List.fromList(this);
   }
 }

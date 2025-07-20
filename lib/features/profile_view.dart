@@ -4,7 +4,7 @@ import 'package:akilli_kapi_guvenlik_sistemi/models/face_model.dart';
 import 'package:flutter/material.dart';
 
 class ProfileView extends StatelessWidget {
-  // HATA DÜZELTMESİ: Beklenen model FaceModel olarak güncellendi.
+  // HATA DÜZELTMESİ: UserProfile -> FaceModel
   final FaceModel profile;
 
   const ProfileView({required this.profile, super.key});

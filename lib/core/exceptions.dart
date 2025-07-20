@@ -33,7 +33,7 @@ class CameraException extends AppException {
 // --- Veritabanı Hataları ---
 class DatabaseException extends AppException {
   DatabaseException({
-    String message = 'Veritabanı işlemi sırasında bir hata oluştu.',
+    required String message,
     String? devMessage,
   }) : super(
           message: message,
@@ -66,32 +66,31 @@ class ImageProcessingException extends AppException {
 }
 
 class ModelLoadException extends AppException {
-    ModelLoadException({
-    String message = 'Yapay zeka modeli yüklenemedi.',
+  ModelLoadException({
+    required String message,
     String? devMessage,
   }) : super(
           message: message,
           developerMessage: devMessage,
-          category: ErrorCategory.general, // Model yükleme genel bir hatadır
+          category: ErrorCategory.model,
         );
 }
 
 class ModelNotLoadedException extends AppException {
-    ModelNotLoadedException({
-    String message = 'Yapay zeka modeli henüz yüklenmedi.',
+  ModelNotLoadedException({
+    required String message,
     String? devMessage,
   }) : super(
           message: message,
           developerMessage: devMessage,
-          category: ErrorCategory.general,
+          category: ErrorCategory.model,
         );
 }
-
 
 // --- Ağ Hataları ---
 class NetworkException extends AppException {
   NetworkException({
-    String message = 'Ağ bağlantısı kurulamadı veya zaman aşımına uğradı.',
+    required String message,
     String? devMessage,
   }) : super(
           message: message,
@@ -103,11 +102,11 @@ class NetworkException extends AppException {
 // --- Dosya Sistemi Hataları ---
 class FileSystemException extends AppException {
   FileSystemException({
-    String message = 'Dosya okuma/yazma sırasında bir hata oluştu.',
+    required String message,
     String? devMessage,
   }) : super(
           message: message,
           developerMessage: devMessage,
-          category: ErrorCategory.file,
+          category: ErrorCategory.fileSystem,
         );
 }
