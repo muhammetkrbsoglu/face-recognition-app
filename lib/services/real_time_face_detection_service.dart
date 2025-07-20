@@ -5,14 +5,13 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // Hata için eklendi: DeviceOrientation
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
 import '../core/error_handler.dart';
 
 /// Gerçek zamanlı yüz tespiti ve kalite analizi yapan servis.
 class RealTimeFaceDetectionService {
-  // Servis artık CameraController'ı kendi içinde yönetmiyor, dışarıdan alıyor.
   CameraController? _cameraController;
   late final FaceDetector _faceDetector;
   final StreamController<FaceDetectionResult> _detectionStreamController =
@@ -20,11 +19,9 @@ class RealTimeFaceDetectionService {
 
   bool _isDetecting = false;
 
-  /// Yüz tespit sonuçlarını dinlemek için kullanılan stream.
   Stream<FaceDetectionResult> get detectionStream =>
       _detectionStreamController.stream;
 
-  /// Servisi başlatır, kamera ve yüz dedektörünü hazırlar.
   Future<void> initialize(CameraController controller) async {
     _cameraController = controller;
     final options = FaceDetectorOptions(
@@ -36,7 +33,6 @@ class RealTimeFaceDetectionService {
     log('RealTimeFaceDetectionService başlatıldı.', name: 'FaceDetectionService');
   }
 
-  /// Gelen kamera görüntüsünü işler.
   Future<void> processImage(CameraImage image, CameraDescription camera) async {
     if (_cameraController == null || !_cameraController!.value.isInitialized || _isDetecting) return;
 
@@ -67,13 +63,12 @@ class RealTimeFaceDetectionService {
         _detectionStreamController.add(result);
       }
     } catch (e, s) {
-      // Hata düzeltmesi: logError -> log
       ErrorHandler.log(
         'Görüntü işleme sırasında kritik hata oluştu.',
         error: e,
         stackTrace: s,
         level: LogLevel.error,
-        category: 'FaceDetection',
+        category: ErrorCategory.faceDetection, // Hata Düzeltmesi
       );
       _detectionStreamController.add(FaceDetectionResult(
         faces: [],
@@ -88,7 +83,6 @@ class RealTimeFaceDetectionService {
     }
   }
 
-  /// Tespit edilen yüzü kalite kriterlerine göre analiz eder.
   FaceDetectionResult _analyzeFace(Face face, int imageWidth, int imageHeight) {
     double confidence = 1.0;
     String message = "Yüz kalitesi mükemmel!";
@@ -137,19 +131,19 @@ class RealTimeFaceDetectionService {
     );
   }
 
-  /// `CameraImage`'i `InputImage`'e dönüştürür.
   InputImage? _inputImageFromCameraImage(
       CameraImage image, CameraDescription camera) {
     try {
-      // Hata düzeltmesi: InputImageFormatValue.fromRaw -> switch case
-      final InputImageFormat? format = InputImageFormat.values.firstWhere(
-        (element) => element.raw == image.format.raw,
-        orElse: () => null,
-      );
-
-      if (format == null) {
-        log('HATA: Desteklenmeyen görüntü formatı: ${image.format.group}', name: 'FaceDetectionService');
-        return null;
+      final InputImageFormat format;
+      // Hata Düzeltmesi: Platforma göre format belirlendi
+      if (Platform.isAndroid) {
+          format = InputImageFormat.nv21;
+      } else if (Platform.isIOS) {
+          format = InputImageFormat.bgra8888;
+      } else {
+          // Diğer platformlar için varsayılan veya hata
+          log('Desteklenmeyen platform: ${Platform.operatingSystem}', name: 'FaceDetectionService');
+          return null;
       }
 
       final imageRotation = _getRotation(
@@ -183,17 +177,25 @@ class RealTimeFaceDetectionService {
         error: e,
         stackTrace: s,
         level: LogLevel.error,
-        category: 'FaceDetection',
+        category: ErrorCategory.faceDetection, // Hata Düzeltmesi
       );
       return null;
     }
   }
 
-  /// Cihaz ve kamera sensör yönelimlerine göre doğru görüntü rotasyonunu hesaplar.
   InputImageRotation _getRotation(
       int sensorOrientation, DeviceOrientation deviceOrientation) {
     if (Platform.isIOS) {
-      return InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
+       final Map<DeviceOrientation, int> orientationMap = {
+        DeviceOrientation.portraitUp: 0,
+        DeviceOrientation.landscapeLeft: 90,
+        DeviceOrientation.portraitDown: 180,
+        DeviceOrientation.landscapeRight: 270,
+      };
+      final deviceOrientationAngle = orientationMap[deviceOrientation] ?? 0;
+      var rotation = (sensorOrientation + deviceOrientationAngle) % 360;
+      return InputImageRotationValue.fromRawValue(rotation) ?? InputImageRotation.rotation0deg;
+
     } else if (Platform.isAndroid) {
       final Map<DeviceOrientation, int> orientationMap = {
         DeviceOrientation.portraitUp: 0,
@@ -213,7 +215,6 @@ class RealTimeFaceDetectionService {
     return InputImageRotation.rotation0deg;
   }
 
-  /// Servisi sonlandırır ve kaynakları serbest bırakır.
   void dispose() {
     _faceDetector.close();
     _detectionStreamController.close();
@@ -221,13 +222,12 @@ class RealTimeFaceDetectionService {
   }
 }
 
-/// Yüz tespiti sonuçlarını ve kalite metriklerini içeren model sınıfı.
 class FaceDetectionResult {
   final List<Face> faces;
   final String message;
   final double confidence;
   final bool qualityMet;
-  final Size imageSize; // Hata için eklendi
+  final Size imageSize;
 
   FaceDetectionResult({
     required this.faces,

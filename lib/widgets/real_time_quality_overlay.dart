@@ -1,8 +1,9 @@
 import 'dart:async';
-import 'dart:ui' as ui;
+import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
 import '../services/real_time_face_detection_service.dart';
 
@@ -40,12 +41,12 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
       widget.cameraDescription,
       ResolutionPreset.high,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.nv21,
+      // Hata Düzeltmesi: Platforma göre doğru format seçildi
+      imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888,
     );
     await _cameraController!.initialize();
     if (!mounted) return;
 
-    // Hata düzeltmesi: Servis'e controller'ı burada iletiyoruz.
     await _faceDetectionService.initialize(_cameraController!);
 
     setState(() {});
@@ -61,7 +62,6 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
 
     _cameraController!.startImageStream((image) {
       _lastImage = image;
-      // Hata düzeltmesi: detectFaces -> processImage
       _faceDetectionService.processImage(image, widget.cameraDescription);
     });
   }
@@ -79,6 +79,8 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
     if (_lastImage != null &&
         _currentFaceResult != null &&
         _currentFaceResult!.faces.isNotEmpty) {
+      // Önce stream'i durdurarak gereksiz işlem yapılmasını engelle
+      _cameraController?.stopImageStream();
       widget.onFaceVerified(_lastImage!, _currentFaceResult!.faces.first);
     }
   }
@@ -97,6 +99,7 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
           painter: FacePainter(
             faceResult: _currentFaceResult,
             cameraPreviewSze: _cameraController!.value.previewSize!,
+            cameraLensDirection: widget.cameraDescription.lensDirection,
           ),
         ),
         Align(
@@ -118,7 +121,6 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
                 ),
                 const SizedBox(height: 10),
                 ElevatedButton(
-                  // Butonun aktif/pasif durumu kaliteye göre belirleniyor.
                   onPressed: (_currentFaceResult?.qualityMet ?? false)
                       ? _onVerifyButtonPressed
                       : null,
@@ -142,8 +144,14 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
 class FacePainter extends CustomPainter {
   final FaceDetectionResult? faceResult;
   final Size cameraPreviewSze;
+  final CameraLensDirection cameraLensDirection;
 
-  FacePainter({required this.faceResult, required this.cameraPreviewSze});
+
+  FacePainter({
+    required this.faceResult, 
+    required this.cameraPreviewSze,
+    required this.cameraLensDirection,
+    });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -152,13 +160,11 @@ class FacePainter extends CustomPainter {
     final face = faceResult!.faces.first;
     final imageSize = faceResult!.imageSize;
 
-    // Hata düzeltmesi: Çerçeve rengi burada hesaplanıyor.
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.0
       ..color = _getFaceFrameColor(faceResult!.confidence);
 
-    // Koordinatları önizleme boyutuna göre ölçekle.
     final scaledRect = _scaleRect(
       rect: face.boundingBox,
       imageSize: imageSize,
@@ -173,10 +179,11 @@ class FacePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant FacePainter oldDelegate) {
-    return oldDelegate.faceResult != faceResult;
+    return oldDelegate.faceResult != faceResult ||
+           oldDelegate.cameraPreviewSze != cameraPreviewSze ||
+           oldDelegate.cameraLensDirection != cameraLensDirection;
   }
 
-  // Hata düzeltmesi: Renk belirleme mantığı buraya taşındı.
   Color _getFaceFrameColor(double confidence) {
     if (confidence > 0.9) {
       return Colors.greenAccent;
@@ -187,20 +194,38 @@ class FacePainter extends CustomPainter {
     }
   }
 
-  // Koordinatları ölçeklendirme fonksiyonu.
+  // Hata Düzeltmesi: Platforma ve kamera yönüne göre daha doğru ölçekleme
   Rect _scaleRect({
     required Rect rect,
     required Size imageSize,
     required Size widgetSize,
   }) {
-    final scaleX = widgetSize.width / imageSize.height;
-    final scaleY = widgetSize.height / imageSize.width;
+    final double scaleX = widgetSize.width / (Platform.isIOS ? imageSize.width : imageSize.height);
+    final double scaleY = widgetSize.height / (Platform.isIOS ? imageSize.height : imageSize.width);
 
-    final scaledLeft = widgetSize.width - (rect.left * scaleX) - (rect.width * scaleX);
-    final scaledTop = rect.top * scaleY;
-    final scaledWidth = rect.width * scaleX;
-    final scaledHeight = rect.height * scaleY;
+    final bool isFrontCamera = cameraLensDirection == CameraLensDirection.front;
 
-    return Rect.fromLTWH(scaledLeft, scaledTop, scaledWidth, scaledHeight);
+    // Android ve iOS'un görüntü akışını farklı işlemesinden kaynaklanan
+    // koordinat sistemi farklılıklarını düzeltir.
+    if (Platform.isAndroid) {
+        final double left = isFrontCamera 
+            ? widgetSize.width - (rect.left * scaleX) - (rect.width * scaleX)
+            : rect.left * scaleX;
+        return Rect.fromLTWH(
+            left,
+            rect.top * scaleY,
+            rect.width * scaleX,
+            rect.height * scaleY,
+        );
+    } 
+    // iOS için ölçekleme genellikle daha basittir.
+    else {
+        return Rect.fromLTWH(
+            rect.left * scaleX,
+            rect.top * scaleY,
+            rect.width * scaleX,
+            rect.height * scaleY,
+        );
+    }
   }
 }

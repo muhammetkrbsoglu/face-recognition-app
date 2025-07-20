@@ -1,977 +1,615 @@
+import 'dart:async';
+import 'dart:developer';
 import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:camera/camera.dart';
-import 'package:local_auth/local_auth.dart';
-import 'dart:math';
-import 'package:akilli_kapi_guvenlik_sistemi/services/face_embedding_service.dart';
-import 'package:akilli_kapi_guvenlik_sistemi/services/face_database_service.dart';
+
+import 'package:akilli_kapi_guvenlik_sistemi/core/error_handler.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/core/services/door_service.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/features/face_embedding_test_page.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/features/profile_view.dart';
 import 'package:akilli_kapi_guvenlik_sistemi/models/face_model.dart';
-import 'package:akilli_kapi_guvenlik_sistemi/services/real_time_quality_service.dart';
-import 'package:akilli_kapi_guvenlik_sistemi/services/real_time_face_detection_service.dart';
-import 'package:akilli_kapi_guvenlik_sistemi/widgets/real_time_quality_overlay.dart';
-import 'package:akilli_kapi_guvenlik_sistemi/services/face_mesh_detection_service.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/services/face_database_service.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/services/face_embedding_service.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/services/face_match_service.dart';
 import 'package:akilli_kapi_guvenlik_sistemi/services/performance_metrics_service.dart';
-import 'core/services/door_service.dart';
-import 'core/error_handler.dart';
-import 'package:flutter/services.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/services/real_time_quality_service.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/utils/face_file_service.dart';
 import 'package:akilli_kapi_guvenlik_sistemi/widgets/enhanced_animations.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/widgets/real_time_quality_overlay.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter/material.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:image/image.dart' as img;
 
+late List<CameraDescription> _cameras;
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  ErrorHandler.info(
-    'Uygulama başlatılıyor',
-    category: ErrorCategory.system,
-    tag: 'APP_START',
-  );
-  
   try {
-    await Future.wait([
-      FaceDatabaseService.database,
-      FaceMeshDetectionService().initialize(),
-    ]);
-    ErrorHandler.info(
-      'Tüm temel servisler başarıyla başlatıldı',
-      category: ErrorCategory.system,
-      tag: 'SERVICES_READY',
-    );
-  } catch (e) {
-     ErrorHandler.critical(
-      'Kritik servisler başlatılamadı: $e',
-      category: ErrorCategory.system,
-      tag: 'CRITICAL_SERVICE_FAILURE',
+    _cameras = await availableCameras();
+    // Servislerin başlatılması
+    await ErrorHandler.initialize(logToFile: true);
+    await FaceDatabaseService.instance.initialize();
+    await FaceEmbeddingService.instance.initialize();
+  } on CameraException catch (e, s) {
+    ErrorHandler.log(
+      'Kamera başlatılamadı. Uygulama için kritik bir hata.',
       error: e,
+      stackTrace: s,
+      level: LogLevel.critical,
+      category: ErrorCategory.camera,
+    );
+  } catch (e, s) {
+    ErrorHandler.log(
+      'Uygulama başlatılırken genel bir hata oluştu.',
+      error: e,
+      stackTrace: s,
+      level: LogLevel.critical,
+      category: ErrorCategory.general,
     );
   }
-  
-  PerformanceMetricsService().startMonitoring();
-  
-  ErrorHandler.info(
-    'Uygulama başlatma tamamlandı',
-    category: ErrorCategory.system,
-    tag: 'APP_READY',
-  );
-  
-  runApp(const FaceRecognitionApp());
+  runApp(const MyApp());
 }
 
-class FaceRecognitionApp extends StatelessWidget {
-  const FaceRecognitionApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Yüz Tanıma Kapı Açma Sistemi',
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-          useMaterial3: true,
-        ),
-        localizationsDelegates: const [
-          GlobalMaterialLocalizations.delegate,
-          GlobalWidgetsLocalizations.delegate,
-          GlobalCupertinoLocalizations.delegate,
-        ],
-        supportedLocales: const [Locale('tr', '')],
-        locale: const Locale('tr'),
-        home: const MainScaffold(),
-      );
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Yüz Tanıma Güvenlik Sistemi',
+      theme: ThemeData(
+        primarySwatch: Colors.indigo,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+        useMaterial3: true,
+      ),
+      home: const MyHomePage(),
+    );
+  }
 }
 
-class MainScaffold extends StatefulWidget {
-  const MainScaffold({super.key});
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key});
 
   @override
-  State<MainScaffold> createState() => _MainScaffoldState();
+  State<MyHomePage> createState() => _MyHomePageState();
 }
 
-class _MainScaffoldState extends State<MainScaffold> {
-  int _selectedIndex = 0;
-  late final FaceEmbeddingService _embeddingService;
-  bool _modelLoaded = false;
-  String? _modelError;
+class _MyHomePageState extends State<MyHomePage> {
+  final FaceDatabaseService _dbService = FaceDatabaseService.instance;
+  final PerformanceMetricsService _performanceMetricsService =
+      PerformanceMetricsService();
+  final FaceMatchService _faceMatchService = FaceMatchService();
+  final FaceEmbeddingService _faceEmbeddingService = FaceEmbeddingService.instance;
+
+  List<FaceModel> _registeredFaces = [];
+  String? _performanceStatus;
+  CameraDescription? _frontCamera;
 
   @override
   void initState() {
     super.initState();
-    _embeddingService = FaceEmbeddingService();
-    _loadModel();
-  }
-
-  Future<void> _loadModel() async {
-    try {
-      ErrorHandler.info(
-        'Ana yüz tanıma modeli yükleniyor',
-        category: ErrorCategory.model,
-        tag: 'MAIN_MODEL_LOAD_START',
-      );
-      await _embeddingService.loadModel();
-      if (!mounted) return;
-      
-      setState(() {
-        _modelLoaded = true;
-      });
-
-      ErrorHandler.info(
-        'Ana yüz tanıma modeli başarıyla yüklendi',
-        category: ErrorCategory.model,
-        tag: 'MAIN_MODEL_LOAD_SUCCESS',
-      );
-    } catch (e, stackTrace) {
-      if (!mounted) return;
-      
-      final errorMessage = 'Model yüklenemedi: $e';
-      
-      ErrorHandler.error(
-        'Ana yüz tanıma modeli yüklenemedi',
-        category: ErrorCategory.model,
-        tag: 'MAIN_MODEL_LOAD_FAILED',
-        error: e,
-        stackTrace: stackTrace,
-      );
-      
-      setState(() {
-        _modelError = errorMessage;
-      });
-    }
+    _initializePerformanceMonitor();
+    _findFrontCamera();
+    _loadRegisteredFaces();
   }
 
   @override
-  Widget build(BuildContext context) {
-    if (_modelError != null) {
-      return _buildErrorScaffold(_modelError!);
-    }
-    if (!_modelLoaded) {
-      return _buildLoadingScaffold();
-    }
+  void dispose() {
+    _performanceMetricsService.dispose();
+    super.dispose();
+  }
 
-    final pages = [
-      HomePage(embeddingService: _embeddingService),
-      AdminPage(embeddingService: _embeddingService),
-    ];
+  void _findFrontCamera() {
+     if (_cameras.isEmpty) {
+      ErrorHandler.showError(context, 'Kamera bulunamadı.');
+      return;
+    }
+    _frontCamera = _cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => _cameras.first);
+  }
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Yüz Tanıma Kapı Açma Sistemi')),
-      body: pages[_selectedIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        onTap: (idx) => setState(() => _selectedIndex = idx),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Ana Sayfa'),
-          BottomNavigationBarItem(icon: Icon(Icons.admin_panel_settings), label: 'Yönetici'),
-        ],
+  void _initializePerformanceMonitor() {
+    _performanceMetricsService.performanceStream.listen((status) {
+      if (mounted) {
+        setState(() {
+          _performanceStatus = status;
+        });
+      }
+    });
+  }
+
+  Future<void> _loadRegisteredFaces() async {
+    try {
+      final faces = await _dbService.getAllFaces();
+      setState(() {
+        _registeredFaces = faces;
+      });
+    } catch (e, s) {
+      ErrorHandler.log('Kayıtlı yüzler yüklenemedi',
+          error: e, stackTrace: s, category: ErrorCategory.database);
+      ErrorHandler.showError(context, 'Veritabanından yüzler okunamadı.');
+    }
+  }
+
+  Future<void> _deleteFace(int id) async {
+    bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Kaydı Sil'),
+          content: const Text('Bu kişiyi silmek istediğinizden emin misiniz?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('İptal'),
+              onPressed: () => Navigator.of(context).pop(false),
+            ),
+            TextButton(
+              child: const Text('Sil', style: TextStyle(color: Colors.red)),
+              onPressed: () => Navigator.of(context).pop(true),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed == true) {
+      try {
+        await _dbService.deleteFace(id);
+        ErrorHandler.showSuccess(context, 'Kayıt başarıyla silindi.');
+        _loadRegisteredFaces();
+      } catch (e, s) {
+        ErrorHandler.log('Yüz silinemedi',
+            error: e, stackTrace: s, category: ErrorCategory.database);
+        ErrorHandler.showError(context, 'Kayıt silinirken bir hata oluştu.');
+      }
+    }
+  }
+
+  Future<img.Image?> _cropFace(CameraImage image, Face face) async {
+    try {
+      final convertedImage = await _convertCameraImage(image);
+      if (convertedImage == null) return null;
+
+      final boundingBox = face.boundingBox;
+      final x = boundingBox.left.toInt().clamp(0, convertedImage.width);
+      final y = boundingBox.top.toInt().clamp(0, convertedImage.height);
+      final w = boundingBox.width.toInt().clamp(0, convertedImage.width - x);
+      final h = boundingBox.height.toInt().clamp(0, convertedImage.height - y);
+
+      return img.copyCrop(convertedImage, x: x, y: y, width: w, height: h);
+    } catch (e, s) {
+      ErrorHandler.log('Yüz kırpma hatası',
+          error: e, stackTrace: s, category: ErrorCategory.imageProcessing);
+      return null;
+    }
+  }
+
+  Future<img.Image?> _convertCameraImage(CameraImage image) async {
+    try {
+      if (image.format.group == ImageFormatGroup.yuv420) {
+        // HATA DÜZELTMESİ: ycrcb -> luminance
+        // YUV formatının ilk düzlemi (Y plane) parlaklık (luminance) bilgisini içerir
+        // ve bu, yüz tanıma için yeterli olan bir grayscale görüntü sağlar.
+        return img.Image.fromBytes(
+          width: image.width,
+          height: image.height,
+          bytes: image.planes[0].bytes.buffer,
+          order: img.ChannelOrder.luminance,
+        );
+      } else if (image.format.group == ImageFormatGroup.bgra8888) {
+        return img.Image.fromBytes(
+          width: image.width,
+          height: image.height,
+          bytes: image.planes[0].bytes.buffer,
+          order: img.ChannelOrder.bgra,
+        );
+      }
+      ErrorHandler.log('Desteklenmeyen görüntü formatı: ${image.format.group}');
+      return null;
+    } catch (e, s) {
+      ErrorHandler.log('CameraImage dönüştürme hatası',
+          error: e, stackTrace: s, category: ErrorCategory.imageProcessing);
+      return null;
+    }
+  }
+
+  Future<void> _registerFace(
+      String name, String gender, CameraImage image, Face face) async {
+    try {
+      final stopwatch = Stopwatch()..start();
+
+      final croppedFace = await _cropFace(image, face);
+      if (croppedFace == null) {
+        ErrorHandler.showError(context, 'Yüz kırpılamadı.');
+        return;
+      }
+
+      final qualityResult =
+          RealTimeQualityService.analyzeImageQuality(croppedFace);
+      log('Kayıt için son kalite kontrolü: ${qualityResult.status}, Skor: ${qualityResult.score}');
+      if (qualityResult.status == ImageQualityStatus.Poor) {
+        ErrorHandler.showError(context,
+            'Düşük görüntü kalitesi nedeniyle kayıt yapılamadı. Lütfen daha aydınlık bir ortamda tekrar deneyin.');
+        return;
+      }
+
+      final embeddings =
+          await _faceEmbeddingService.getEmbeddingsFromImage(croppedFace);
+      if (embeddings == null) {
+        ErrorHandler.showError(context, 'Yüz vektörleri oluşturulamadı.');
+        return;
+      }
+
+      final faceImagePath =
+          await FaceFileService.saveFaceImage(croppedFace, name);
+
+      final newFace = FaceModel(
+        name: name,
+        gender: gender,
+        imagePath: faceImagePath,
+        embeddings: embeddings,
+      );
+
+      await _dbService.insertFace(newFace);
+      stopwatch.stop();
+      ErrorHandler.showSuccess(context,
+          '$name başarıyla kaydedildi! (${stopwatch.elapsedMilliseconds}ms)');
+      _loadRegisteredFaces();
+    } catch (e, s) {
+      ErrorHandler.log('Yüz kayıt hatası',
+          error: e, stackTrace: s, category: ErrorCategory.database);
+      ErrorHandler.showError(
+          context, 'Kayıt sırasında bir hata oluştu: ${e.toString()}');
+    }
+  }
+
+  Future<void> _recognizeFace(CameraImage image, Face face) async {
+    Navigator.of(context).pop(); // Tarayıcıyı kapat
+    final stopwatch = Stopwatch()..start();
+
+    try {
+      final croppedFace = await _cropFace(image, face);
+      if (croppedFace == null) {
+        ErrorHandler.showError(context, 'Tanınacak yüz işlenemedi.');
+        return;
+      }
+
+      final liveEmbeddings =
+          await _faceEmbeddingService.getEmbeddingsFromImage(croppedFace);
+      if (liveEmbeddings == null) {
+        ErrorHandler.showError(context, 'Anlık yüz vektörleri alınamadı.');
+        return;
+      }
+
+      if (_registeredFaces.isEmpty) {
+        ErrorHandler.showError(context, 'Veritabanında kayıtlı yüz yok.');
+        return;
+      }
+
+      final matchResult =
+          _faceMatchService.findBestMatch(liveEmbeddings, _registeredFaces);
+
+      stopwatch.stop();
+      log('Tanıma süresi: ${stopwatch.elapsedMilliseconds}ms');
+
+      if (matchResult.bestMatch != null && matchResult.confidence > 0.85) {
+        // Eşleşme bulundu
+        _showMatchResultDialog(matchResult.bestMatch!, matchResult.confidence);
+      } else {
+        // Eşleşme bulunamadı
+        _showMatchResultDialog(null, 0);
+      }
+    } catch (e, s) {
+      ErrorHandler.log('Yüz tanıma hatası',
+          error: e, stackTrace: s, category: ErrorCategory.faceRecognition);
+      ErrorHandler.showError(context, 'Tanıma sırasında bir hata oluştu.');
+    }
+  }
+
+  void _showMatchResultDialog(FaceModel? matchedFace, double confidence) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        final bool isMatch = matchedFace != null;
+        return AlertDialog(
+          title: Text(isMatch ? 'Yüz Tanındı' : 'Yüz Tanınamadı'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isMatch)
+                ProfilePicture(
+                    imagePath: matchedFace.imagePath, radius: 50)
+              else
+                const Icon(Icons.error_outline, color: Colors.red, size: 60),
+              const SizedBox(height: 16),
+              Text(
+                isMatch
+                    ? 'Hoşgeldin, ${matchedFace.name}!'
+                    : 'Sistemde kayıtlı bir eşleşme bulunamadı.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 18),
+              ),
+              if (isMatch)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Text(
+                    'Benzerlik: ${(confidence * 100).toStringAsFixed(2)}%',
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
+                ),
+            ],
+          ),
+          actions: [
+            if (isMatch)
+              TextButton(
+                onPressed: () async {
+                  Navigator.of(context).pop();
+                  try {
+                    await DoorService.openDoor();
+                    ErrorHandler.showSuccess(context, 'Kapı kilidi açıldı!');
+                  } catch (e) {
+                    ErrorHandler.showError(context,
+                        'Kapı kilidiyle iletişim kurulamadı: ${e.toString()}');
+                  }
+                },
+                child: const Text('Kapıyı Aç'),
+              ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Kapat'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showFaceScanner() {
+    if (_frontCamera == null) {
+      ErrorHandler.showError(context, 'Ön kamera bulunamadı veya hazır değil.');
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.8,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Container(
+          decoration: const BoxDecoration(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            color: Colors.white,
+          ),
+          child: RealTimeQualityOverlay(
+            cameraDescription: _frontCamera!,
+            onFaceVerified: (image, face) {
+              _recognizeFace(image, face);
+            },
+          ),
+        ),
       ),
     );
   }
 
-
-  Scaffold _buildErrorScaffold(String error) => Scaffold(
-        appBar: AppBar(title: const Text('Hata')),
-        body: Center(child: Text(error, style: const TextStyle(color: Colors.red, fontSize: 16))),
-      );
-
-  Scaffold _buildLoadingScaffold() => Scaffold(
-        appBar: AppBar(title: const Text('Yükleniyor')),
-        body: const Center(child: CircularProgressIndicator()),
-      );
-}
-
-// ------------------------------------------------------------
-// Ana Sayfa
-class HomePage extends StatefulWidget {
-  final FaceEmbeddingService embeddingService;
-  const HomePage({super.key, required this.embeddingService});
-
-  @override
-  State<HomePage> createState() => _HomePageState();
-}
-
-class _HomePageState extends State<HomePage> {
-  CameraController? _cameraController;
-  CameraDescription? _cameraDescription; // Kameranın tanımını saklamak için
-  bool _cameraInitialized = false;
-  bool _processing = false;
-  String? _resultMessage;
-  bool _cameraError = false;
-  bool _canCapture = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initializeCamera();
-  }
-  
-  @override
-  void dispose() {
-    _cameraController?.stopImageStream();
-    _cameraController?.dispose();
-    super.dispose();
-  }
-
-  Future<void> _initializeCamera() async {
-    try {
-      final cameras = await availableCameras();
-      final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
-      
-      _cameraDescription = frontCamera; // Kamera tanımını sakla
-      
-      _cameraController = CameraController(
-        frontCamera, 
-        ResolutionPreset.medium,
-        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.yuv420 : ImageFormatGroup.bgra8888,
-        enableAudio: false,
-      );
-      await _cameraController!.initialize();
-      if (!mounted) return;
-      setState(() {
-        _cameraInitialized = true;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _cameraError = true;
-      });
-      if (mounted) {
-        ErrorHandler.showError(context, 'Kamera başlatılamadı.', userFriendlyKey: 'camera_not_available');
-      }
+  void _showFaceRegistrationScanner() {
+    if (_frontCamera == null) {
+      ErrorHandler.showError(context, 'Ön kamera bulunamadı veya hazır değil.');
+      return;
     }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.8,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Container(
+          decoration: const BoxDecoration(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            color: Colors.white,
+          ),
+          child: RealTimeQualityOverlay(
+            cameraDescription: _frontCamera!,
+            onFaceVerified: (image, face) {
+              Navigator.of(context).pop(); // Tarayıcıyı kapat
+              _showRegistrationDialog(image, face);
+            },
+          ),
+        ),
+      ),
+    );
   }
 
-  List<double> _normalize(List<double> vector) {
-    double sumSq = 0.0;
-    for (var val in vector) {
-      sumSq += val * val;
-    }
-    double magnitude = sqrt(sumSq);
-    if (magnitude == 0) return List<double>.filled(vector.length, 0.0);
-    return vector.map((val) => val / magnitude).toList();
-  }
+  void _showRegistrationDialog(CameraImage image, Face face) {
+    final nameController = TextEditingController();
+    String selectedGender = 'Erkek';
+    final formKey = GlobalKey<FormState>();
 
-  double _cosineDistance(List<double> v1, List<double> v2) {
-    if (v1.isEmpty || v2.isEmpty || v1.length != v2.length) {
-      throw ArgumentError('Vektörler boş olamaz ve aynı uzunlukta olmalıdır.');
-    }
-    double dotProduct = 0.0;
-    for (int i = 0; i < v1.length; i++) {
-      dotProduct += v1[i] * v2[i];
-    }
-    return 1.0 - dotProduct;
-  }
-
-  Future<void> _recognizeFace() async {
-    if(!_cameraInitialized || _cameraController == null || _processing || !_canCapture) return;
-
-    setState(() {
-      _processing = true;
-      _resultMessage = null;
-    });
-    try {
-      final image = await _cameraController!.takePicture();
-      
-      final qualityResult = await RealTimeQualityService.assessQuality(File(image.path));
-      
-      if (qualityResult.status == QualityStatus.rejected || qualityResult.status == QualityStatus.poor) {
-        if(mounted) ErrorHandler.showWarning(context, 'Fotoğraf uygun değil: ${qualityResult.message}');
-        setState(() { _resultMessage = 'Fotoğraf uygun değil: ${qualityResult.message}'; });
-        return;
-      }
-      
-      if (qualityResult.status == QualityStatus.acceptable) {
-        if(mounted) _showCustomSnackbar('⚠️ Kalite düşük: ${qualityResult.message}', isError: true);
-      }
-      
-      final embedding = await widget.embeddingService.extractEmbedding(File(image.path));
-      final normalizedInput = _normalize(embedding);
-      final faces = await FaceDatabaseService.getAllFaces();
-
-      if (faces.isEmpty) {
-        if(mounted) ErrorHandler.showWarning(context, 'Kayıtlı yüz bulunamadı.');
-        setState(() { _resultMessage = 'Kayıtlı yüz bulunamadı.'; });
-        return;
-      }
-
-      double minDist = double.infinity;
-      FaceModel? matchedFace;
-      for (final face in faces) {
-        if (face.embedding != null && face.embedding!.isNotEmpty) {
-          final dist = _cosineDistance(normalizedInput, _normalize(face.embedding!));
-          if (dist < minDist) {
-            minDist = dist;
-            matchedFace = face;
-          }
-        }
-      }
-      
-      if (minDist < 0.7 && matchedFace != null) {
-        _showSuccessAnimation(matchedFace.name, matchedFace.gender);
-        String hitap = matchedFace.gender == 'female' ? 'Hanım' : 'Bey';
-        String greeting = 'Hoşgeldiniz ${matchedFace.name} $hitap';
-        setState(() { _resultMessage = greeting; });
-        await _unlockDoor(greeting);
-      } else {
-        _showFailureAnimation();
-        setState(() { _resultMessage = 'Yüz tanınamadı.'; });
-      }
-    } catch (e) {
-      if(mounted) ErrorHandler.showError(context, 'Tanıma sırasında hata oluştu: $e');
-      setState(() { _resultMessage = 'Tanıma sırasında hata oluştu.'; });
-    } finally {
-      if(mounted) setState(() { _processing = false; });
-    }
-  }
-  
-  Future<void> _unlockDoor(String greeting) async {
-    try {
-      final doorService = DoorService();
-      final success = await doorService.unlockDoor();
-      if (mounted) {
-        if (success) {
-          _showCustomSnackbar('$greeting - Kapı açıldı!', isError: false);
-        } else {
-          _showCustomSnackbar('$greeting - Ancak kapı açılamadı!', isError: true);
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        _showCustomSnackbar('Kapı açma isteği gönderilemedi!', isError: true);
-      }
-    }
-  }
-
-
-  void _showCustomSnackbar(String message, {bool isError = false}) {
-    if(!mounted) return;
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            Icon(isError ? Icons.error_outline : Icons.verified, color: isError ? Colors.red : Colors.green, size: 28),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: isError ? Colors.red.shade700 : Colors.green.shade700,
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text('Yeni Kişi Kaydet'),
+              content: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: nameController,
+                      decoration: const InputDecoration(labelText: 'İsim Soyisim'),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Lütfen bir isim girin.';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      value: selectedGender,
+                      decoration: const InputDecoration(labelText: 'Cinsiyet'),
+                      items: ['Erkek', 'Kadın']
+                          .map((label) => DropdownMenuItem(
+                                value: label,
+                                child: Text(label),
+                              ))
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setState(() {
+                            selectedGender = value;
+                          });
+                        }
+                      },
+                    ),
+                  ],
                 ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
               ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('İptal'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    if (formKey.currentState!.validate()) {
+                      Navigator.of(context).pop();
+                      _registerFace(nameController.text, selectedGender, image, face);
+                    }
+                  },
+                  child: const Text('Kaydet'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Yönetim Paneli'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.biotech),
+            tooltip: 'Embedding Test',
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (context) => const FaceEmbeddingTestPage(),
+              ));
+            },
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 16.0),
+            child: Center(
+              child: Text(
+                _performanceStatus ?? '...',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: _registeredFaces.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('Sistemde kayıtlı kimse bulunmuyor.',
+                      style: TextStyle(fontSize: 18)),
+                  const SizedBox(height: 20),
+                  ElevatedButton.icon(
+                    onPressed: _showFaceRegistrationScanner,
+                    icon: const Icon(Icons.person_add_alt_1),
+                    label: const Text('İlk Kişiyi Ekle'),
+                  )
+                ],
+              ),
+            )
+          : ListView.builder(
+              itemCount: _registeredFaces.length,
+              itemBuilder: (context, index) {
+                final face = _registeredFaces[index];
+                return SlideInAnimation(
+                  delay: Duration(milliseconds: 100 * (index % 10)),
+                  child: Card(
+                    margin:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: ListTile(
+                      leading: ProfilePicture(imagePath: face.imagePath),
+                      title: Text(face.name,
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(face.gender),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        onPressed: () => _deleteFace(face.id!),
+                      ),
+                      onTap: () {
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (context) => ProfileView(profile: face),
+                        ));
+                      },
+                    ),
+                  ),
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showFaceScanner,
+        label: const Text('Kapıyı Aç'),
+        icon: const Icon(Icons.camera_alt),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      bottomNavigationBar: BottomAppBar(
+        shape: const CircularNotchedRectangle(),
+        notchMargin: 6.0,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.person_add),
+              tooltip: 'Yeni Kişi Ekle',
+              onPressed: _showFaceRegistrationScanner,
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Listeyi Yenile',
+              onPressed: _loadRegisteredFaces,
             ),
           ],
         ),
-        backgroundColor: isError ? Colors.red.shade50 : Colors.green.shade50,
-        duration: Duration(milliseconds: isError ? 3000 : 1800),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-        elevation: 8,
-      ),
-    );
-  }
-
-  void _showSuccessAnimation(String name, String? gender) {
-    if(!mounted) return;
-    EnhancedAnimations.showSuccessAnimation(context, name);
-  }
-
-  void _showFailureAnimation() {
-    if(!mounted) return;
-    EnhancedAnimations.showErrorAnimation(context, 'Yüz Tanınamadı');
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_cameraError) {
-      return const Center(child: Text('Kamera başlatılamadı', style: TextStyle(color: Colors.red)));
-    }
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        if (_cameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
-          SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: _cameraController!.value.previewSize!.height,
-                height: _cameraController!.value.previewSize!.width,
-                child: CameraPreview(_cameraController!),
-              ),
-            ),
-          )
-        else
-          const Center(child: CircularProgressIndicator()),
-        
-        if (_cameraInitialized && _cameraController != null && _cameraDescription != null)
-          RealTimeQualityOverlay(
-            cameraController: _cameraController!,
-            cameraDescription: _cameraDescription!,
-            isCapturing: _processing,
-            onQualityChanged: (canCapture) {
-              if (mounted && _canCapture != canCapture) {
-                setState(() {
-                  _canCapture = canCapture;
-                });
-              }
-            },
-          ),
-
-        Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.5),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 400),
-                  child: _processing
-                      ? Container(
-                          key: const ValueKey('loading'),
-                          width: 70,
-                          height: 70,
-                          padding: const EdgeInsets.all(12),
-                          child: const CircularProgressIndicator(
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                            strokeWidth: 6,
-                          ),
-                        )
-                      : ElevatedButton(
-                          key: const ValueKey('button'),
-                          onPressed: _processing || !_cameraInitialized || !_canCapture ? null : _recognizeFace,
-                          style: ElevatedButton.styleFrom(
-                            shape: const CircleBorder(),
-                            padding: const EdgeInsets.all(20),
-                            backgroundColor: _canCapture ? Colors.deepPurple : Colors.grey,
-                            foregroundColor: Colors.white,
-                          ),
-                          child: const Icon(Icons.camera_alt, size: 30),
-                        ),
-                ),
-                const SizedBox(height: 12),
-                if (_resultMessage != null && !_processing)
-                  Text(
-                    _resultMessage!,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ------------------------------------------------------------
-// Yönetici Sayfası
-class AdminPage extends StatefulWidget {
-  final FaceEmbeddingService embeddingService;
-  const AdminPage({super.key, required this.embeddingService});
-
-  @override
-  State<AdminPage> createState() => _AdminPageState();
-}
-
-class _AdminPageState extends State<AdminPage> {
-  final LocalAuthentication _auth = LocalAuthentication();
-  bool _authenticated = false;
-  String? _errorMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _authenticate();
-  }
-
-  Future<void> _authenticate() async {
-    try {
-      if (!await _auth.isDeviceSupported()) {
-        _setError('Cihazınız biyometrik doğrulamayı desteklemiyor.');
-        return;
-      }
-      final authenticated = await _auth.authenticate(
-        localizedReason: 'Yönetici sayfasına erişmek için kimliğinizi doğrulayın',
-        options: const AuthenticationOptions(biometricOnly: false, stickyAuth: true),
-      );
-      if (!mounted) return;
-      if (authenticated) {
-        setState(() {
-          _authenticated = true;
-          _errorMessage = null;
-        });
-      } else {
-        _setError('Kimlik doğrulama başarısız.');
-      }
-    } catch (e) {
-      _setError('Kimlik doğrulama sırasında hata oluştu: $e');
-    }
-  }
-
-  void _setError(String message) {
-    if (!mounted) return;
-    setState(() => _errorMessage = message);
-    _showSnackbar(message);
-  }
-
-  void _showSnackbar(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_errorMessage != null && !_authenticated) {
-      return Center(child: Text(_errorMessage!, style: const TextStyle(color: Colors.red)));
-    }
-    if (!_authenticated) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text('Yönetici Sayfası', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 24),
-          Card(
-            elevation: 4,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: _showAddFaceDialog,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                child: ListTile(
-                  leading: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.deepPurple.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    padding: const EdgeInsets.all(8),
-                    child: const Icon(Icons.person_add_alt_1, color: Colors.deepPurple, size: 32),
-                  ),
-                  title: const Text('Yeni Yüz Ekle', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  subtitle: const Text('Farklı pozlarda 5 fotoğraf çekilecek ve isim girilecek.'),
-                  trailing: const Icon(Icons.arrow_forward_ios, color: Colors.deepPurple),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Card(
-            elevation: 4,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: _showViewFacesDialog,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                child: ListTile(
-                  leading: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.deepPurple.shade50,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    padding: const EdgeInsets.all(8),
-                    child: const Icon(Icons.list_alt, color: Colors.deepPurple, size: 32),
-                  ),
-                  title: const Text('Kayıtlı Yüzleri Görüntüle', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                  subtitle: const Text('Kayıtlı yüzleri listele, düzenle veya sil.'),
-                  trailing: const Icon(Icons.arrow_forward_ios, color: Colors.deepPurple),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showAddFaceDialog() async {
-    await showDialog(
-      context: context,
-      builder: (context) => AddFaceDialog(embeddingService: widget.embeddingService),
-    );
-  }
-
-  Future<void> _showViewFacesDialog() async {
-    await showDialog(
-      context: context,
-      builder: (context) => const ViewFacesDialog(),
-    );
-  }
-}
-
-// ------------------------------------------------------------
-// Yeni Yüz Ekleme Dialog
-class AddFaceDialog extends StatefulWidget {
-  final FaceEmbeddingService embeddingService;
-  const AddFaceDialog({super.key, required this.embeddingService});
-
-  @override
-  State<AddFaceDialog> createState() => _AddFaceDialogState();
-}
-
-class _AddFaceDialogState extends State<AddFaceDialog> {
-  int _currentStep = 0;
-  final List<String> _poseLabels = ['Düz Bakış', 'Sağa Bakış', 'Sola Bakış', 'Aşağı Bakış', 'Yukarı Bakış'];
-  final List<XFile?> _capturedImages = List<XFile?>.filled(5, null);
-  final TextEditingController _nameController = TextEditingController();
-  String _selectedGender = 'male';
-  bool _isSaving = false;
-  CameraController? _cameraController;
-  CameraDescription? _cameraDescription;
-  bool _cameraInitialized = false;
-  bool _cameraError = false;
-  
-  bool _canCapture = false;
-  bool _isCapturing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initializeCamera();
-  }
-
-  Future<void> _initializeCamera() async {
-    try {
-      final cameras = await availableCameras();
-      final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
-      
-      _cameraDescription = frontCamera;
-
-      _cameraController = CameraController(
-        frontCamera, 
-        ResolutionPreset.medium,
-        imageFormatGroup: Platform.isAndroid ? ImageFormatGroup.yuv420 : ImageFormatGroup.bgra8888,
-      );
-      await _cameraController!.initialize();
-      if (!mounted) return;
-      setState(() {
-        _cameraInitialized = true;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _cameraError = true;
-      });
-      if(mounted) ErrorHandler.showError(context, 'Kamera başlatılamadı.');
-    }
-  }
-
-  @override
-  void dispose() {
-    _cameraController?.stopImageStream();
-    _cameraController?.dispose();
-    _nameController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _captureImage() async {
-    if (!_cameraInitialized || _cameraController == null || _isCapturing || !_canCapture) return;
-    
-    setState(() {
-      _isCapturing = true;
-    });
-    
-    try {
-      final image = await _cameraController!.takePicture();
-      
-      final qualityResult = await RealTimeQualityService.assessQuality(File(image.path));
-      
-      if (qualityResult.status == QualityStatus.rejected ||
-          qualityResult.status == QualityStatus.poor) {
-        if (mounted) ErrorHandler.showWarning(context, 'Fotoğraf kalitesi uygun değil: ${qualityResult.message}');
-        return;
-      }
-      
-      if (qualityResult.status == QualityStatus.acceptable) {
-        if (mounted) ErrorHandler.showInfo(context, 'Fotoğraf kabul edilebilir kalitede: ${qualityResult.message}');
-      }
-      
-      if (!mounted) return;
-      setState(() {
-        _capturedImages[_currentStep] = image;
-      });
-      
-      if (mounted) ErrorHandler.showSuccess(context, '✅ ${_poseLabels[_currentStep]} fotoğrafı çekildi!');
-      
-      if (_currentStep < 4) {
-        setState(() {
-          _currentStep++;
-        });
-      }
-    } catch (e) {
-      if (mounted) ErrorHandler.showError(context, 'Fotoğraf çekilemedi: $e');
-    } finally {
-      if(mounted) setState(() => _isCapturing = false);
-    }
-  }
-
-  Future<void> _saveFace() async {
-    if (_nameController.text.trim().isEmpty) {
-      if (mounted) ErrorHandler.showWarning(context, 'Lütfen isim giriniz');
-      return;
-    }
-    if (_capturedImages.any((img) => img == null)) {
-      if (mounted) ErrorHandler.showWarning(context, 'Lütfen tüm pozların fotoğrafını çekiniz');
-      return;
-    }
-    setState(() => _isSaving = true);
-    try {
-      final imagePaths = _capturedImages.map((img) => img!.path).toList();
-      final name = _nameController.text.trim();
-      final gender = _selectedGender;
-      
-      List<List<double>> embeddings = [];
-      for (var path in imagePaths) {
-        final embedding = await widget.embeddingService.extractEmbedding(File(path));
-        embeddings.add(embedding);
-      }
-      
-      List<double> averageEmbedding = List.filled(embeddings[0].length, 0);
-      for (var e in embeddings) {
-        for (int i = 0; i < e.length; i++) {
-          averageEmbedding[i] += e[i];
-        }
-      }
-      for (int i = 0; i < averageEmbedding.length; i++) {
-        averageEmbedding[i] /= embeddings.length;
-      }
-      
-      final face = FaceModel(
-        name: name,
-        gender: gender,
-        imagePaths: imagePaths,
-        embedding: averageEmbedding,
-      );
-      
-      await FaceDatabaseService.insertFace(face);
-      if (mounted) {
-        ErrorHandler.showSuccess(context, 'Yüz başarıyla kaydedildi!');
-        Navigator.of(context).pop();
-      }
-    } catch (e) {
-      if (mounted) ErrorHandler.showError(context, 'Yüz kaydedilemedi: $e');
-    } finally {
-      if(mounted) setState(() => _isSaving = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isNameEntryStep = _capturedImages.every((img) => img != null);
-    
-    return Dialog(
-      insetPadding: const EdgeInsets.all(16.0),
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                isNameEntryStep ? 'Bilgileri Girin' : 'Yüz Ekle (${_currentStep + 1}/5)',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
-              const SizedBox(height: 16),
-              if (!isNameEntryStep) ...[
-                if (_cameraInitialized && _cameraController != null && _cameraController!.value.isInitialized)
-                  SizedBox(
-                    height: 320,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: AspectRatio(
-                        aspectRatio: _cameraController!.value.previewSize!.height / _cameraController!.value.previewSize!.width,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            CameraPreview(_cameraController!),
-                            if (_cameraDescription != null)
-                              RealTimeQualityOverlay(
-                                cameraController: _cameraController!,
-                                cameraDescription: _cameraDescription!,
-                                isCapturing: _isCapturing,
-                                onQualityChanged: (canCapture) {
-                                  if (mounted && _canCapture != canCapture) {
-                                    setState(() {
-                                      _canCapture = canCapture;
-                                    });
-                                  }
-                                },
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  const SizedBox(height: 320, child: Center(child: CircularProgressIndicator())),
-                const SizedBox(height: 8),
-                Text(_poseLabels[_currentStep]),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _isCapturing || !_canCapture ? null : _captureImage,
-                  icon: _isCapturing ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.camera_alt),
-                  label: const Text('Fotoğraf Çek'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _canCapture ? Colors.deepPurple : Colors.grey,
-                  ),
-                ),
-              ] else ...[
-                const Text('Kayıtlı kişinin adını ve cinsiyetini girin.'),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _nameController,
-                  decoration: const InputDecoration(
-                    labelText: 'İsim',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Text('Cinsiyet:'),
-                    Radio<String>(
-                      value: 'male',
-                      groupValue: _selectedGender,
-                      onChanged: (val) {
-                        if (val != null) setState(() => _selectedGender = val);
-                      },
-                    ),
-                    const Text('Erkek'),
-                    Radio<String>(
-                      value: 'female',
-                      groupValue: _selectedGender,
-                      onChanged: (val) {
-                        if (val != null) setState(() => _selectedGender = val);
-                      },
-                    ),
-                    const Text('Kadın'),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('İptal'),
-                  ),
-                  const SizedBox(width: 8),
-                  if (isNameEntryStep)
-                    ElevatedButton(
-                      onPressed: _isSaving ? null : _saveFace,
-                      child: _isSaving ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Kaydet'),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
 }
 
-// ------------------------------------------------------------
-// Kayıtlı Yüzleri Görüntüle Dialog
-class ViewFacesDialog extends StatefulWidget {
-  const ViewFacesDialog({super.key});
+class ProfilePicture extends StatelessWidget {
+  final String imagePath;
+  final double radius;
 
-  @override
-  State<ViewFacesDialog> createState() => _ViewFacesDialogState();
-}
-
-class _ViewFacesDialogState extends State<ViewFacesDialog> {
-  List<FaceModel> _faces = [];
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadFaces();
-  }
-
-  Future<void> _loadFaces() async {
-    try {
-      final faces = await FaceDatabaseService.getAllFaces();
-      if (!mounted) return;
-      setState(() {
-        _faces = faces;
-        _loading = false;
-      });
-    } catch (e) {
-      if(mounted) ErrorHandler.showError(context, 'Yüzler yüklenemedi: $e');
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _deleteFace(FaceModel face) async {
-    try {
-      await FaceDatabaseService.deleteFace(face);
-      if (mounted) {
-        ErrorHandler.showSuccess(context, '${face.name} silindi.');
-        _loadFaces();
-      }
-    } catch (e) {
-      if(mounted) ErrorHandler.showError(context, 'Yüz silinemedi: $e');
-    }
-  }
+  const ProfilePicture({super.key, required this.imagePath, this.radius = 30});
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Kayıtlı Yüzler'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _faces.isEmpty
-                ? const Center(child: Text('Kayıtlı yüz bulunamadı.'))
-                : ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: _faces.length,
-                    itemBuilder: (context, index) {
-                      final face = _faces[index];
-                      return ListTile(
-                        leading: face.imagePaths.isNotEmpty
-                            ? CircleAvatar(backgroundImage: FileImage(File(face.imagePaths[0])))
-                            : const CircleAvatar(child: Icon(Icons.person)),
-                        title: Text(face.name),
-                        subtitle: Text(face.gender == 'male' ? 'Erkek' : 'Kadın'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () => _deleteFace(face),
-                        ),
-                      );
-                    },
-                  ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Kapat'),
-        ),
-      ],
+    return CircleAvatar(
+      radius: radius,
+      backgroundImage: FileImage(File(imagePath)),
+      onBackgroundImageError: (exception, stackTrace) {
+        ErrorHandler.log('Profil resmi yüklenemedi: $imagePath',
+            error: exception, stackTrace: stackTrace);
+      },
     );
   }
 }

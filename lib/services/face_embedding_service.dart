@@ -1,129 +1,77 @@
-import 'dart:io';
-import 'package:flutter/foundation.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:image/image.dart' as img;
-import '../core/error_handler.dart';
-import '../core/exceptions.dart' as app_exceptions;
-// import 'gpu_delegate_service.dart'; // GPU Delegate şimdilik kullanılmayacak.
-import 'dart:math';
+import 'dart:typed_data';
 
-/// TFLite modelini yöneten ve yüz embedding'i çıkaran merkezi servis.
+import 'package:akilli_kapi_guvenlik_sistemi/core/error_handler.dart';
+import 'package:akilli_kapi_guvenlik_sistemi/core/exceptions.dart';
+import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:tflite_flutter/tflite_flutter.dart';
+
+/// Yüz görüntülerinden embedding vektörleri çıkaran servis.
 class FaceEmbeddingService {
-  static final FaceEmbeddingService _instance = FaceEmbeddingService._internal();
-  factory FaceEmbeddingService() => _instance;
-  FaceEmbeddingService._internal();
+  // Singleton pattern
+  FaceEmbeddingService._privateConstructor();
+  static final FaceEmbeddingService instance =
+      FaceEmbeddingService._privateConstructor();
 
   Interpreter? _interpreter;
-  static const String _modelPath = 'assets/models/arcface_512d.tflite';
-  static const String _modelName = 'ArcFace 512D';
+  static const String _modelPath = 'assets/models/facenet.tflite';
+  static const int _inputSize = 112;
+  static const int _outputSize = 512;
 
-  bool get isModelLoaded => _interpreter != null;
-
-  void _debugLog(String message) {
-    if (kDebugMode) {
-      final timestamp = DateTime.now().toString().substring(11, 23);
-      debugPrint('[$timestamp] [FaceEmbeddingService] $message');
+  /// Modeli yükler ve servisi başlatır.
+  Future<void> initialize() async {
+    try {
+      _interpreter = await Interpreter.fromAsset(_modelPath);
+    } catch (e, s) {
+      ErrorHandler.log('TFLite modeli yüklenemedi: $_modelPath',
+          error: e, stackTrace: s, category: ErrorCategory.general);
+      throw ModelLoadException('FaceNet modeli yüklenirken bir hata oluştu.');
     }
   }
 
-  /// Modeli yükler.
-  Future<void> loadModel() async {
-    if (isModelLoaded) {
-      _debugLog('Model zaten yüklü, tekrar yükleme atlanıyor.');
-      return;
+  /// Verilen bir görüntüden 512 boyutlu bir embedding vektörü çıkarır.
+  Future<Float32List?> getEmbeddingsFromImage(img.Image image) async {
+    if (_interpreter == null) {
+      ErrorHandler.log('Interpreter başlatılmamış.', level: LogLevel.error);
+      throw ModelNotLoadedException('Embedding servisi başlatılmamış.');
     }
     try {
-      _debugLog('Model yükleme başlıyor: $_modelName');
+      // Görüntüyü modelin istediği formata getir (112x112 RGB)
+      final img.Image resizedImage =
+          img.copyResize(image, width: _inputSize, height: _inputSize);
+      final Float32List imageBuffer = _imageToFloat32List(resizedImage);
 
-      // --- KRİTİK DÜZELTME: GPU DELEGATE DEVRE DIŞI BIRAKILDI ---
-      // Sorunun GPU uyumluluğu olup olmadığını test etmek için
-      // modeli sadece CPU üzerinde çalışacak şekilde yüklüyoruz.
-      // Bu, en stabil ve en güvenilir yöntemdir.
-      final options = InterpreterOptions();
+      // Çıktı için bir buffer oluştur
+      final Float32List outputBuffer = Float32List(_outputSize);
 
-      _interpreter = await Interpreter.fromAsset(
-        _modelPath,
-        options: options, // GpuDelegateService.getGpuOptions() yerine boş options kullanılıyor.
-      );
+      // Modeli çalıştır
+      _interpreter!.run(imageBuffer.buffer.asUint8List().reshape([1, _inputSize, _inputSize, 3]), outputBuffer.buffer.asUint8List().reshape([1, _outputSize]));
 
-      _debugLog('Model başarıyla yüklendi (CPU üzerinde): $_modelName');
-    } catch (e, stackTrace) {
-      ErrorHandler.error(
-        'Model yükleme başarısız: $_modelName',
-        category: ErrorCategory.model,
-        tag: 'LOAD_FAILED',
-        error: e,
-        stackTrace: stackTrace,
-      );
-      throw app_exceptions.ModelException.loadFailed(_modelName, e.toString());
+      return outputBuffer;
+    } catch (e, s) {
+      ErrorHandler.log('Embedding oluşturma hatası',
+          error: e, stackTrace: s, category: ErrorCategory.faceRecognition);
+      return null;
     }
   }
-  
-  List<double> _normalize(List<double> embedding) {
-    final double norm = sqrt(embedding.map((e) => e * e).reduce((a, b) => a + b));
-    if (norm == 0) return embedding;
-    return embedding.map((e) => e / norm).toList();
-  }
 
-  Future<List<double>> extractEmbedding(File imageFile) async {
-    if (!isModelLoaded) {
-      throw app_exceptions.FaceRecognitionException.modelNotLoaded();
-    }
-    if (!await imageFile.exists()) {
-      throw app_exceptions.FileSystemException.fileNotFound(imageFile.path);
-    }
-
-    try {
-      _debugLog('Embedding çıkarma başladı: ${imageFile.path}');
-      
-      final imageBytes = await imageFile.readAsBytes();
-      img.Image? originalImage = img.decodeImage(imageBytes);
-      if (originalImage == null) {
-        throw app_exceptions.FaceRecognitionException.embeddingExtractionFailed('Görüntü çözümlenemedi.');
+  /// Bir `img.Image` nesnesini TFLite modelinin girdisi için Float32List'e dönüştürür.
+  Float32List _imageToFloat32List(img.Image image) {
+    var buffer = Float32List(_inputSize * _inputSize * 3);
+    var bufferIndex = 0;
+    for (var y = 0; y < _inputSize; y++) {
+      for (var x = 0; x < _inputSize; x++) {
+        var pixel = image.getPixel(x, y);
+        buffer[bufferIndex++] = pixel.r.toDouble();
+        buffer[bufferIndex++] = pixel.g.toDouble();
+        buffer[bufferIndex++] = pixel.b.toDouble();
       }
-      img.Image resizedImage = img.copyResize(originalImage, width: 112, height: 112);
-
-      Float32List imageAsFloat32List = Float32List(1 * 112 * 112 * 3);
-      int pixelIndex = 0;
-      for (int y = 0; y < 112; y++) {
-        for (int x = 0; x < 112; x++) {
-          final pixel = resizedImage.getPixel(x, y);
-          imageAsFloat32List[pixelIndex++] = (pixel.r - 127.5) / 127.5;
-          imageAsFloat32List[pixelIndex++] = (pixel.g - 127.5) / 127.5;
-          imageAsFloat32List[pixelIndex++] = (pixel.b - 127.5) / 127.5;
-        }
-      }
-      
-      final input = imageAsFloat32List.reshape([1, 112, 112, 3]);
-      final output = List.filled(1 * 512, 0.0).reshape([1, 512]);
-
-      _interpreter!.run(input, output);
-      
-      final embedding = _normalize(List<double>.from(output[0]));
-      _debugLog('Embedding başarıyla çıkarıldı. Uzunluk: ${embedding.length}');
-      
-      return embedding;
-
-    } catch (e, stackTrace) {
-      if (e is app_exceptions.AppException) rethrow;
-      
-      ErrorHandler.error(
-        'Embedding çıkarma sırasında beklenmeyen hata',
-        category: ErrorCategory.faceRecognition,
-        tag: 'EXTRACT_FAILED',
-        error: e,
-        stackTrace: stackTrace,
-        metadata: {'imagePath': imageFile.path},
-      );
-      throw app_exceptions.FaceRecognitionException.embeddingExtractionFailed(e.toString());
     }
+    return buffer;
   }
 
+  /// Servisi sonlandırır ve kaynakları serbest bırakır.
   void dispose() {
-    if(isModelLoaded) {
-      _interpreter?.close();
-      _interpreter = null;
-      _debugLog('Servis kaynakları temizlendi.');
-    }
+    _interpreter?.close();
   }
 }
