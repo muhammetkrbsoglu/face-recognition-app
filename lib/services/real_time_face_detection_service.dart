@@ -1,130 +1,164 @@
+import 'dart:async';
+import 'dart:developer';
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Hata için eklendi: DeviceOrientation
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:google_mlkit_commons/google_mlkit_commons.dart'; // HATA DÜZELTİLDİ: Eksik import eklendi.
+
 import '../core/error_handler.dart';
 
-class FaceDetectionResult {
-  final List<Face> faces;
-  final bool hasQualityFace;
-  final String message;
-  final Rect? primaryFaceRect;
-  final double confidence;
-  final Size imageSize;
-
-  FaceDetectionResult({
-    required this.faces,
-    required this.hasQualityFace,
-    required this.message,
-    this.primaryFaceRect,
-    required this.confidence,
-    required this.imageSize,
-  });
-}
-
-class FaceQualityResult {
-  final bool isQuality;
-  final String message;
-  final double confidence;
-
-  FaceQualityResult({
-    required this.isQuality,
-    required this.message,
-    required this.confidence,
-  });
-}
-
+/// Gerçek zamanlı yüz tespiti ve kalite analizi yapan servis.
 class RealTimeFaceDetectionService {
-  static final RealTimeFaceDetectionService _instance = RealTimeFaceDetectionService._internal();
-  factory RealTimeFaceDetectionService() => _instance;
-  RealTimeFaceDetectionService._internal();
+  // Servis artık CameraController'ı kendi içinde yönetmiyor, dışarıdan alıyor.
+  CameraController? _cameraController;
+  late final FaceDetector _faceDetector;
+  final StreamController<FaceDetectionResult> _detectionStreamController =
+      StreamController<FaceDetectionResult>.broadcast();
 
-  FaceDetector? _faceDetector;
-  bool _isProcessing = false;
+  bool _isDetecting = false;
 
-  Future<void> initialize() async {
+  /// Yüz tespit sonuçlarını dinlemek için kullanılan stream.
+  Stream<FaceDetectionResult> get detectionStream =>
+      _detectionStreamController.stream;
+
+  /// Servisi başlatır, kamera ve yüz dedektörünü hazırlar.
+  Future<void> initialize(CameraController controller) async {
+    _cameraController = controller;
     final options = FaceDetectorOptions(
-      enableContours: true,
-      enableLandmarks: true,
-      enableClassification: true,
-      enableTracking: true,
-      minFaceSize: 0.1,
       performanceMode: FaceDetectorMode.fast,
+      enableContours: true,
+      enableClassification: true,
     );
     _faceDetector = FaceDetector(options: options);
+    log('RealTimeFaceDetectionService başlatıldı.', name: 'FaceDetectionService');
   }
 
-  Future<FaceDetectionResult?> detectFaces(CameraImage cameraImage, CameraDescription cameraDescription) async {
-    if (_isProcessing || _faceDetector == null) {
-      return null;
-    }
+  /// Gelen kamera görüntüsünü işler.
+  Future<void> processImage(CameraImage image, CameraDescription camera) async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized || _isDetecting) return;
 
-    _isProcessing = true;
+    _isDetecting = true;
+
     try {
-      final inputImage = _inputImageFromCameraImage(cameraImage, cameraDescription);
+      final inputImage = _inputImageFromCameraImage(image, camera);
       if (inputImage == null) {
-        return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Kamera görüntüsü işlenemedi', confidence: 0.0, imageSize: Size.zero);
+        _isDetecting = false;
+        return;
       }
 
-      final faces = await _faceDetector!.processImage(inputImage);
-      
-      final imageSize = Size(cameraImage.width.toDouble(), cameraImage.height.toDouble());
+      final List<Face> faces = await _faceDetector.processImage(inputImage);
+
+      log('Tespit edilen yüz sayısı: ${faces.length}', name: 'FaceDetectionService');
 
       if (faces.isEmpty) {
-        return FaceDetectionResult(faces: [], hasQualityFace: false, message: '🚫 Yüz bulunamadı. Kameraya bakın.', confidence: 0.0, imageSize: imageSize);
+        _detectionStreamController.add(FaceDetectionResult(
+          faces: [],
+          message: "Kameraya bakın ve yüzünüzü ortalayın",
+          confidence: 0,
+          qualityMet: false,
+          imageSize: Size(image.width.toDouble(), image.height.toDouble()),
+        ));
+      } else {
+        final Face firstFace = faces.first;
+        final result = _analyzeFace(firstFace, image.width, image.height);
+        _detectionStreamController.add(result);
       }
-
-      Face? primaryFace = faces.reduce((a, b) => a.boundingBox.width * a.boundingBox.height > b.boundingBox.width * b.boundingBox.height ? a : b);
-      final qualityResult = _evaluateFaceQuality(primaryFace, cameraImage);
-
-      return FaceDetectionResult(
-        faces: faces,
-        hasQualityFace: qualityResult.isQuality,
-        message: qualityResult.message,
-        primaryFaceRect: primaryFace.boundingBox,
-        confidence: qualityResult.confidence,
-        imageSize: imageSize,
+    } catch (e, s) {
+      // Hata düzeltmesi: logError -> log
+      ErrorHandler.log(
+        'Görüntü işleme sırasında kritik hata oluştu.',
+        error: e,
+        stackTrace: s,
+        level: LogLevel.error,
+        category: 'FaceDetection',
       );
-    } catch (e) {
-      ErrorHandler.error('Face detection error', category: ErrorCategory.faceRecognition, tag: 'FACE_DETECTION_ERROR', error: e);
-      return FaceDetectionResult(faces: [], hasQualityFace: false, message: 'Yüz tespiti hatası: $e', confidence: 0.0, imageSize: Size.zero);
+      _detectionStreamController.add(FaceDetectionResult(
+        faces: [],
+        message: "Hata: Görüntü işlenemedi.",
+        confidence: 0,
+        qualityMet: false,
+        imageSize: Size(image.width.toDouble(), image.height.toDouble()),
+      ));
     } finally {
-      _isProcessing = false;
+      await Future.delayed(const Duration(milliseconds: 60));
+      _isDetecting = false;
     }
   }
 
-  InputImage? _inputImageFromCameraImage(CameraImage image, CameraDescription cameraDescription) {
-    final platform = defaultTargetPlatform;
-    if (platform == TargetPlatform.android) {
-      final sensorOrientation = cameraDescription.sensorOrientation;
-      InputImageRotation? rotation;
-      if (cameraDescription.lensDirection == CameraLensDirection.front) {
-        rotation = InputImageRotationValue.fromRawValue((360 - sensorOrientation) % 360);
-      } else {
-        rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-      }
-      if (rotation == null) return null;
+  /// Tespit edilen yüzü kalite kriterlerine göre analiz eder.
+  FaceDetectionResult _analyzeFace(Face face, int imageWidth, int imageHeight) {
+    double confidence = 1.0;
+    String message = "Yüz kalitesi mükemmel!";
+    bool qualityMet = true;
 
-      final format = InputImageFormatValue.fromRawValue(image.format.raw);
-      if (format == null) return null;
+    final faceWidth = face.boundingBox.width;
+    final minFaceWidth = imageWidth * 0.3;
+    if (faceWidth < minFaceWidth) {
+      confidence -= 0.3;
+      message = "Lütfen biraz daha yaklaşın";
+      qualityMet = false;
+    }
 
-      final planeData = image.planes.map(
-        (Plane plane) {
-          return InputImagePlaneMetadata(
-            bytesPerRow: plane.bytesPerRow,
-            height: plane.height,
-            width: plane.width,
-          );
-        },
-      ).toList();
+    final faceCenterX = face.boundingBox.center.dx;
+    final imageCenterX = imageWidth / 2;
+    final deviation = (faceCenterX - imageCenterX).abs();
+    if (deviation > imageWidth * 0.2) {
+      confidence -= 0.2;
+      message = "Yüzünüzü çerçevenin ortasına getirin";
+      qualityMet = false;
+    }
 
-      final inputImageData = InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: planeData[0].bytesPerRow,
+    if (face.headEulerAngleY != null && face.headEulerAngleY!.abs() > 15) {
+      confidence -= 0.3;
+      message = "Lütfen kameraya düz bakın";
+      qualityMet = false;
+    }
+    if (face.headEulerAngleZ != null && face.headEulerAngleZ!.abs() > 15) {
+      confidence -= 0.3;
+      message = "Lütfen başınızı dik tutun";
+      qualityMet = false;
+    }
+
+    if ((face.leftEyeOpenProbability ?? 1.0) < 0.5 || (face.rightEyeOpenProbability ?? 1.0) < 0.5) {
+      confidence -= 0.2;
+      message = "Lütfen gözlerinizi açın";
+      qualityMet = false;
+    }
+
+    return FaceDetectionResult(
+      faces: [face],
+      message: message,
+      confidence: confidence.clamp(0.0, 1.0),
+      qualityMet: qualityMet,
+      imageSize: Size(imageWidth.toDouble(), imageHeight.toDouble()),
+    );
+  }
+
+  /// `CameraImage`'i `InputImage`'e dönüştürür.
+  InputImage? _inputImageFromCameraImage(
+      CameraImage image, CameraDescription camera) {
+    try {
+      // Hata düzeltmesi: InputImageFormatValue.fromRaw -> switch case
+      final InputImageFormat? format = InputImageFormat.values.firstWhere(
+        (element) => element.raw == image.format.raw,
+        orElse: () => null,
       );
+
+      if (format == null) {
+        log('HATA: Desteklenmeyen görüntü formatı: ${image.format.group}', name: 'FaceDetectionService');
+        return null;
+      }
+
+      final imageRotation = _getRotation(
+          camera.sensorOrientation, _cameraController!.value.deviceOrientation);
+
+      if (image.planes.isEmpty || image.planes[0].bytesPerRow == 0) {
+        log('HATA: Geçersiz görüntü düzlemi (plane) verisi.', name: 'FaceDetectionService');
+        return null;
+      }
 
       final WriteBuffer allBytes = WriteBuffer();
       for (final Plane plane in image.planes) {
@@ -132,72 +166,74 @@ class RealTimeFaceDetectionService {
       }
       final bytes = allBytes.done().buffer.asUint8List();
 
-      return InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
+      final inputImageData = InputImageMetadata(
+        size: Size(image.width.toDouble(), image.height.toDouble()),
+        rotation: imageRotation,
+        format: format,
+        bytesPerRow: image.planes[0].bytesPerRow,
+      );
+
+      return InputImage.fromBytes(
+        bytes: bytes,
+        metadata: inputImageData,
+      );
+    } catch (e, s) {
+      ErrorHandler.log(
+        'InputImage oluşturulurken hata oluştu.',
+        error: e,
+        stackTrace: s,
+        level: LogLevel.error,
+        category: 'FaceDetection',
+      );
+      return null;
     }
-    return null;
   }
 
-  FaceQualityResult _evaluateFaceQuality(Face face, CameraImage cameraImage) {
-    List<String> issues = [];
-    double totalScore = 0;
+  /// Cihaz ve kamera sensör yönelimlerine göre doğru görüntü rotasyonunu hesaplar.
+  InputImageRotation _getRotation(
+      int sensorOrientation, DeviceOrientation deviceOrientation) {
+    if (Platform.isIOS) {
+      return InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
+    } else if (Platform.isAndroid) {
+      final Map<DeviceOrientation, int> orientationMap = {
+        DeviceOrientation.portraitUp: 0,
+        DeviceOrientation.landscapeLeft: 90,
+        DeviceOrientation.portraitDown: 180,
+        DeviceOrientation.landscapeRight: 270,
+      };
+      final deviceOrientationAngle = orientationMap[deviceOrientation] ?? 0;
+      final cameraLensDirection = _cameraController!.description.lensDirection;
 
-    final faceArea = face.boundingBox.width * face.boundingBox.height;
-    final imageArea = cameraImage.width * cameraImage.height;
-    final faceRatio = faceArea / imageArea;
-    if (faceRatio < 0.05) {
-      issues.add('📱 Yüzünüzü yaklaştırın');
-    } else if (faceRatio > 0.4) {
-      issues.add('📱 Yüzünüzü uzaklaştırın');
-    } else {
-      totalScore += 25.0;
+      var rotation = (sensorOrientation - deviceOrientationAngle + 360) % 360;
+      if (cameraLensDirection == CameraLensDirection.front) {
+         rotation = (360 - rotation) % 360;
+      }
+      return InputImageRotationValue.fromRawValue(rotation) ?? InputImageRotation.rotation0deg;
     }
-
-    final rotY = face.headEulerAngleY ?? 0.0;
-    final rotZ = face.headEulerAngleZ ?? 0.0;
-    if (rotY.abs() > 15 || rotZ.abs() > 15) {
-      issues.add('👤 Yüzünüzü dik tutun');
-    } else {
-      totalScore += 25.0;
-    }
-
-    final leftEyeOpen = face.leftEyeOpenProbability ?? 0.0;
-    final rightEyeOpen = face.rightEyeOpenProbability ?? 0.0;
-    if (leftEyeOpen < 0.4 || rightEyeOpen < 0.4) {
-      issues.add('👁️ Gözlerinizi açın');
-    } else {
-      totalScore += 25.0;
-    }
-
-    final faceCenterX = face.boundingBox.left + face.boundingBox.width / 2;
-    final imageCenterX = cameraImage.width / 2;
-    final centerDelta = (faceCenterX - imageCenterX).abs() / imageCenterX;
-    if (centerDelta > 0.4) {
-      issues.add('🎯 Yüzünüzü ortalayın');
-    } else {
-      totalScore += 25.0;
-    }
-
-    final finalScore = totalScore;
-    final isQuality = finalScore >= 60.0;
-
-    String message;
-    if (isQuality) {
-      message = '✅ Mükemmel kalite!';
-    } else {
-      message = issues.isNotEmpty ? '❌ ${issues.first}' : '⚠️ Kalite düşük, pozisyonunuzu ayarlayın';
-    }
-
-    return FaceQualityResult(isQuality: isQuality, message: message, confidence: finalScore);
+    return InputImageRotation.rotation0deg;
   }
 
-  Color getFaceFrameColor(double confidence) {
-    if (confidence >= 75.0) return Colors.green;
-    if (confidence >= 50.0) return Colors.yellow;
-    return Colors.red;
-  }
-
+  /// Servisi sonlandırır ve kaynakları serbest bırakır.
   void dispose() {
-    _faceDetector?.close();
-    _faceDetector = null;
+    _faceDetector.close();
+    _detectionStreamController.close();
+    log('RealTimeFaceDetectionService sonlandırıldı.', name: 'FaceDetectionService');
   }
+}
+
+/// Yüz tespiti sonuçlarını ve kalite metriklerini içeren model sınıfı.
+class FaceDetectionResult {
+  final List<Face> faces;
+  final String message;
+  final double confidence;
+  final bool qualityMet;
+  final Size imageSize; // Hata için eklendi
+
+  FaceDetectionResult({
+    required this.faces,
+    required this.message,
+    required this.confidence,
+    required this.imageSize,
+    this.qualityMet = true,
+  });
 }

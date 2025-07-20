@@ -30,7 +30,6 @@ void main() async {
   try {
     await Future.wait([
       FaceDatabaseService.database,
-      RealTimeFaceDetectionService().initialize(),
       FaceMeshDetectionService().initialize(),
     ]);
     ErrorHandler.info(

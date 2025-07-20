@@ -1,20 +1,20 @@
 import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+
 import '../services/real_time_face_detection_service.dart';
 
+/// Kamera önizlemesi üzerine yüz çerçevesi ve kalite mesajları çizen widget.
 class RealTimeQualityOverlay extends StatefulWidget {
-  final CameraController cameraController;
   final CameraDescription cameraDescription;
-  final Function(bool canCapture) onQualityChanged;
-  final bool isCapturing;
+  final Function(CameraImage image, Face face) onFaceVerified;
 
   const RealTimeQualityOverlay({
     super.key,
-    required this.cameraController,
     required this.cameraDescription,
-    required this.onQualityChanged,
-    this.isCapturing = false,
+    required this.onFaceVerified,
   });
 
   @override
@@ -22,115 +22,114 @@ class RealTimeQualityOverlay extends StatefulWidget {
 }
 
 class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
+  CameraController? _cameraController;
+  final RealTimeFaceDetectionService _faceDetectionService =
+      RealTimeFaceDetectionService();
+  StreamSubscription<FaceDetectionResult>? _detectionSubscription;
   FaceDetectionResult? _currentFaceResult;
-  final RealTimeFaceDetectionService _faceDetectionService = RealTimeFaceDetectionService();
-  bool _isServiceInitialized = false;
-  bool _isProcessingImage = false;
+  CameraImage? _lastImage;
 
   @override
   void initState() {
     super.initState();
-    _initializeFaceDetection();
+    _initializeCamera();
   }
 
-  Future<void> _initializeFaceDetection() async {
-    try {
-      await _faceDetectionService.initialize();
-      if(mounted) {
-        setState(() {
-          _isServiceInitialized = true;
-        });
-        _startFaceDetection();
-      }
-    } catch (e) {
-      debugPrint('Face detection initialization failed: $e');
-    }
-  }
+  Future<void> _initializeCamera() async {
+    _cameraController = CameraController(
+      widget.cameraDescription,
+      ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.nv21,
+    );
+    await _cameraController!.initialize();
+    if (!mounted) return;
 
-  void _startFaceDetection() {
-    if (!_isServiceInitialized) return;
-    
-    if (widget.cameraController.value.isStreamingImages) return;
+    // Hata düzeltmesi: Servis'e controller'ı burada iletiyoruz.
+    await _faceDetectionService.initialize(_cameraController!);
 
-    widget.cameraController.startImageStream((CameraImage image) {
-      if (!mounted || _isProcessingImage) return;
-      
-      _isProcessingImage = true;
-      _processCameraImage(image).whenComplete(() {
-        if (mounted) {
-          _isProcessingImage = false;
-        }
-      });
-    });
-  }
+    setState(() {});
 
-  Future<void> _processCameraImage(CameraImage image) async {
-    try {
-      final result = await _faceDetectionService.detectFaces(image, widget.cameraDescription);
-      
-      if (mounted && result != null) {
+    _detectionSubscription =
+        _faceDetectionService.detectionStream.listen((result) {
+      if (mounted) {
         setState(() {
           _currentFaceResult = result;
         });
-        widget.onQualityChanged(result.hasQualityFace);
       }
-    } catch (e) {
-      debugPrint('Face detection processing error: $e');
-    }
+    });
+
+    _cameraController!.startImageStream((image) {
+      _lastImage = image;
+      // Hata düzeltmesi: detectFaces -> processImage
+      _faceDetectionService.processImage(image, widget.cameraDescription);
+    });
   }
 
   @override
   void dispose() {
-    try {
-      if (widget.cameraController.value.isStreamingImages) {
-        widget.cameraController.stopImageStream();
-      }
-    } catch (e) {
-      debugPrint('Error stopping image stream in overlay: $e');
-    }
+    _cameraController?.stopImageStream();
+    _cameraController?.dispose();
+    _detectionSubscription?.cancel();
     _faceDetectionService.dispose();
     super.dispose();
   }
 
+  void _onVerifyButtonPressed() {
+    if (_lastImage != null &&
+        _currentFaceResult != null &&
+        _currentFaceResult!.faces.isNotEmpty) {
+      widget.onFaceVerified(_lastImage!, _currentFaceResult!.faces.first);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_currentFaceResult == null) {
-      return const Center(
-        child: Text("Yüz aranıyor...", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))
-      );
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return const Center(child: CircularProgressIndicator());
     }
 
     return Stack(
+      fit: StackFit.expand,
       children: [
-        if (_currentFaceResult!.primaryFaceRect != null)
-          CustomPaint(
-            size: Size.infinite,
-            painter: FaceBoxPainter(
-              rect: _currentFaceResult!.primaryFaceRect!,
-              imageSize: _currentFaceResult!.imageSize,
-              cameraLensDirection: widget.cameraDescription.lensDirection,
-              color: _faceDetectionService.getFaceFrameColor(_currentFaceResult!.confidence)
-            ),
+        CameraPreview(_cameraController!),
+        CustomPaint(
+          painter: FacePainter(
+            faceResult: _currentFaceResult,
+            cameraPreviewSze: _cameraController!.value.previewSize!,
           ),
-        
-        Positioned(
-          top: 20,
-          left: 20,
-          right: 20,
+        ),
+        Align(
+          alignment: Alignment.bottomCenter,
           child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.6),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              _currentFaceResult!.message,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-              ),
-              textAlign: TextAlign.center,
+            width: double.infinity,
+            padding: const EdgeInsets.all(16.0),
+            color: Colors.black.withOpacity(0.5),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _currentFaceResult?.message ?? "Kamera başlatılıyor...",
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 10),
+                ElevatedButton(
+                  // Butonun aktif/pasif durumu kaliteye göre belirleniyor.
+                  onPressed: (_currentFaceResult?.qualityMet ?? false)
+                      ? _onVerifyButtonPressed
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: (_currentFaceResult?.qualityMet ?? false)
+                        ? Colors.green
+                        : Colors.grey,
+                  ),
+                  child: const Text("Yüzü Doğrula"),
+                ),
+              ],
             ),
           ),
         ),
@@ -139,33 +138,31 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
   }
 }
 
-class FaceBoxPainter extends CustomPainter {
-  final Rect rect;
-  final Size imageSize;
-  final CameraLensDirection cameraLensDirection;
-  final Color color;
+/// Yüz çerçevesini ve konturlarını çizen `CustomPainter`.
+class FacePainter extends CustomPainter {
+  final FaceDetectionResult? faceResult;
+  final Size cameraPreviewSze;
 
-  FaceBoxPainter({required this.rect, required this.imageSize, required this.cameraLensDirection, required this.color});
+  FacePainter({required this.faceResult, required this.cameraPreviewSze});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 3.0
-      ..style = PaintingStyle.stroke;
-    
-    final scaleX = size.width / imageSize.width;
-    final scaleY = size.height / imageSize.height;
+    if (faceResult == null || faceResult!.faces.isEmpty) return;
 
-    final left = cameraLensDirection == CameraLensDirection.front
-        ? size.width - (rect.left * scaleX) - (rect.width * scaleX)
-        : rect.left * scaleX;
-    
-    final scaledRect = Rect.fromLTWH(
-      left,
-      rect.top * scaleY,
-      rect.width * scaleX,
-      rect.height * scaleY,
+    final face = faceResult!.faces.first;
+    final imageSize = faceResult!.imageSize;
+
+    // Hata düzeltmesi: Çerçeve rengi burada hesaplanıyor.
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0
+      ..color = _getFaceFrameColor(faceResult!.confidence);
+
+    // Koordinatları önizleme boyutuna göre ölçekle.
+    final scaledRect = _scaleRect(
+      rect: face.boundingBox,
+      imageSize: imageSize,
+      widgetSize: size,
     );
 
     canvas.drawRRect(
@@ -175,5 +172,35 @@ class FaceBoxPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant FacePainter oldDelegate) {
+    return oldDelegate.faceResult != faceResult;
+  }
+
+  // Hata düzeltmesi: Renk belirleme mantığı buraya taşındı.
+  Color _getFaceFrameColor(double confidence) {
+    if (confidence > 0.9) {
+      return Colors.greenAccent;
+    } else if (confidence > 0.6) {
+      return Colors.yellowAccent;
+    } else {
+      return Colors.redAccent;
+    }
+  }
+
+  // Koordinatları ölçeklendirme fonksiyonu.
+  Rect _scaleRect({
+    required Rect rect,
+    required Size imageSize,
+    required Size widgetSize,
+  }) {
+    final scaleX = widgetSize.width / imageSize.height;
+    final scaleY = widgetSize.height / imageSize.width;
+
+    final scaledLeft = widgetSize.width - (rect.left * scaleX) - (rect.width * scaleX);
+    final scaledTop = rect.top * scaleY;
+    final scaledWidth = rect.width * scaleX;
+    final scaledHeight = rect.height * scaleY;
+
+    return Rect.fromLTWH(scaledLeft, scaledTop, scaledWidth, scaledHeight);
+  }
 }
