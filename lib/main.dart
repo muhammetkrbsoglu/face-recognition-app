@@ -188,14 +188,13 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<img.Image?> _convertCameraImage(CameraImage image) async {
     try {
       if (image.format.group == ImageFormatGroup.yuv420) {
-        // HATA DÜZELTMESİ: ycrcb -> luminance
-        // YUV formatının ilk düzlemi (Y plane) parlaklık (luminance) bilgisini içerir
+        // HATA DÜZELTMESİ: YUV formatının ilk düzlemi (Y plane) parlaklık (luminance) bilgisini içerir
         // ve bu, yüz tanıma için yeterli olan bir grayscale görüntü sağlar.
         return img.Image.fromBytes(
           width: image.width,
           height: image.height,
           bytes: image.planes[0].bytes.buffer,
-          order: img.ChannelOrder.luminance,
+          format: img.Format.uint8,
         );
       } else if (image.format.group == ImageFormatGroup.bgra8888) {
         return img.Image.fromBytes(
