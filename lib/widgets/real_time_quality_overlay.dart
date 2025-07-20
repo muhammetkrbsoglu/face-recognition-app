@@ -1,4 +1,4 @@
-import 'dart:async'; // HATA DÜZELTİLDİ: 'dart.async' -> 'dart:async'
+import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import '../services/real_time_face_detection_service.dart';

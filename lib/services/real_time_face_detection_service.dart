@@ -2,7 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:google_mlkit_commons/google_mlkit_commons.dart';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart'; // HATA DÜZELTİLDİ: Eksik import eklendi.
 import '../core/error_handler.dart';
 
 class FaceDetectionResult {
@@ -109,11 +109,21 @@ class RealTimeFaceDetectionService {
       final format = InputImageFormatValue.fromRawValue(image.format.raw);
       if (format == null) return null;
 
+      final planeData = image.planes.map(
+        (Plane plane) {
+          return InputImagePlaneMetadata(
+            bytesPerRow: plane.bytesPerRow,
+            height: plane.height,
+            width: plane.width,
+          );
+        },
+      ).toList();
+
       final inputImageData = InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
         format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
+        bytesPerRow: planeData[0].bytesPerRow,
       );
 
       final WriteBuffer allBytes = WriteBuffer();
