@@ -408,7 +408,6 @@ class _HomePageState extends State<HomePage> {
         if (_cameraInitialized && _cameraController != null && _cameraDescription != null)
           RealTimeQualityOverlay(
             cameraController: _cameraController!,
-            // DÜZELTME: Gerekli olan cameraDescription parametresi eklendi.
             cameraDescription: _cameraDescription!,
             isCapturing: _processing,
             onQualityChanged: (canCapture) {
@@ -638,7 +637,7 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
   String _selectedGender = 'male';
   bool _isSaving = false;
   CameraController? _cameraController;
-  CameraDescription? _cameraDescription; // Kameranın tanımını saklamak için
+  CameraDescription? _cameraDescription;
   bool _cameraInitialized = false;
   bool _cameraError = false;
   
@@ -656,7 +655,7 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
       final cameras = await availableCameras();
       final frontCamera = cameras.firstWhere((c) => c.lensDirection == CameraLensDirection.front, orElse: () => cameras.first);
       
-      _cameraDescription = frontCamera; // Kamera tanımını sakla
+      _cameraDescription = frontCamera;
 
       _cameraController = CameraController(
         frontCamera, 
@@ -808,7 +807,6 @@ class _AddFaceDialogState extends State<AddFaceDialog> {
                             if (_cameraDescription != null)
                               RealTimeQualityOverlay(
                                 cameraController: _cameraController!,
-                                // DÜZELTME: Gerekli olan cameraDescription parametresi eklendi.
                                 cameraDescription: _cameraDescription!,
                                 isCapturing: _isCapturing,
                                 onQualityChanged: (canCapture) {

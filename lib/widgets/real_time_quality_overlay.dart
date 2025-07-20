@@ -1,18 +1,18 @@
-import 'dart:async';
+import 'dart:async'; // HATA DÜZELTİLDİ: 'dart.async' -> 'dart:async'
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import '../services/real_time_face_detection_service.dart';
 
 class RealTimeQualityOverlay extends StatefulWidget {
   final CameraController cameraController;
-  final CameraDescription cameraDescription; // Bu yeni parametre eklendi
+  final CameraDescription cameraDescription;
   final Function(bool canCapture) onQualityChanged;
   final bool isCapturing;
 
   const RealTimeQualityOverlay({
     super.key,
     required this.cameraController,
-    required this.cameraDescription, // Bu yeni parametre eklendi
+    required this.cameraDescription,
     required this.onQualityChanged,
     this.isCapturing = false,
   });
@@ -50,7 +50,6 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
   void _startFaceDetection() {
     if (!_isServiceInitialized) return;
     
-    // Zaten bir akış varsa başlatma
     if (widget.cameraController.value.isStreamingImages) return;
 
     widget.cameraController.startImageStream((CameraImage image) {
@@ -82,7 +81,6 @@ class _RealTimeQualityOverlayState extends State<RealTimeQualityOverlay> {
 
   @override
   void dispose() {
-    // Hata almamak için güvenli bir şekilde akışı durdur
     try {
       if (widget.cameraController.value.isStreamingImages) {
         widget.cameraController.stopImageStream();
@@ -159,7 +157,6 @@ class FaceBoxPainter extends CustomPainter {
     final scaleX = size.width / imageSize.width;
     final scaleY = size.height / imageSize.height;
 
-    // Ön kamera için görüntüyü yatayda çevir (ayna efekti)
     final left = cameraLensDirection == CameraLensDirection.front
         ? size.width - (rect.left * scaleX) - (rect.width * scaleX)
         : rect.left * scaleX;

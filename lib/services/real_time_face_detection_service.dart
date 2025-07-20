@@ -2,6 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 import '../core/error_handler.dart';
 
 class FaceDetectionResult {
@@ -93,14 +94,13 @@ class RealTimeFaceDetectionService {
     }
   }
 
-  // --- KÖK NEDENİ ÇÖZEN NİHAİ FONKSİYON ---
   InputImage? _inputImageFromCameraImage(CameraImage image, CameraDescription cameraDescription) {
     final platform = defaultTargetPlatform;
     if (platform == TargetPlatform.android) {
       final sensorOrientation = cameraDescription.sensorOrientation;
       InputImageRotation? rotation;
       if (cameraDescription.lensDirection == CameraLensDirection.front) {
-        rotation = InputImageRotationValue.fromRawValue((sensorOrientation + 180) % 360);
+        rotation = InputImageRotationValue.fromRawValue((360 - sensorOrientation) % 360);
       } else {
         rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
       }
@@ -109,21 +109,11 @@ class RealTimeFaceDetectionService {
       final format = InputImageFormatValue.fromRawValue(image.format.raw);
       if (format == null) return null;
 
-      final planeData = image.planes.map(
-        (Plane plane) {
-          return InputImagePlaneMetadata(
-            bytesPerRow: plane.bytesPerRow,
-            height: plane.height,
-            width: plane.width,
-          );
-        },
-      ).toList();
-
       final inputImageData = InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
         format: format,
-        bytesPerRow: planeData[0].bytesPerRow,
+        bytesPerRow: image.planes[0].bytesPerRow,
       );
 
       final WriteBuffer allBytes = WriteBuffer();
@@ -134,7 +124,7 @@ class RealTimeFaceDetectionService {
 
       return InputImage.fromBytes(bytes: bytes, metadata: inputImageData);
     }
-    return null; // Diğer platformlar için implementasyon eklenebilir.
+    return null;
   }
 
   FaceQualityResult _evaluateFaceQuality(Face face, CameraImage cameraImage) {
